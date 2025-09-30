@@ -1,0 +1,6 @@
+#!/usr/bin/expect -f
+
+spawn scp -r /Users/carlosarroyo/newchecks avrio@192.168.1.240:~/
+expect "password:"
+send "Checks@104!\r"
+expect eof 

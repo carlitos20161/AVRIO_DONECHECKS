@@ -1,0 +1,135 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // === USERS ===
+   match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin() || request.auth.uid == userId;
+}
+
+        // === COMPANIES ===
+    match /companies/{companyId} {
+      allow get: if isAdmin() || isAuthorizedDocId(companyId);
+      allow list: if isAdmin() || isAuthenticated();
+
+      allow update: if isAdmin() || (
+  isActive() &&
+  isAuthorizedDocId(companyId) &&
+  request.resource.data.diff(resource.data).changedKeys().hasOnly(["nextCheckNumber"]) &&
+  request.resource.data.nextCheckNumber is int &&
+  request.resource.data.nextCheckNumber > resource.data.nextCheckNumber
+);
+      allow create, delete: if isAdmin();
+    }
+
+
+    // === CLIENTS ===
+    match /clients/{clientId} {
+      allow read, write: if isAdmin();
+    }
+
+    // === BANKS ===
+    match /banks/{bankId} {
+      allow read: if isAdmin() || isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+  match /employees/{employeeId} {
+  allow list: if isAuthenticated();
+  allow read: if isAuthenticated();
+  allow write: if isAdmin();
+}
+
+
+
+
+
+
+
+
+    // === CHECKS ===
+  match /checks/{checkId} {
+  // ✅ allow read (get + list) if user is admin or the check's companyId is in their assigned companies
+  allow read: if isAdmin() || (
+    isAuthenticated() &&
+    resource.data.companyId in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.companyIds
+  );
+
+  allow write: if isAdmin() || (
+    isActive() &&
+    request.resource.data.companyId in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.companyIds
+  );
+}
+
+
+
+    // === REVIEW REQUESTS ===
+    match /reviewRequest/{requestId} {
+      // Users can create review requests
+      allow create: if isAuthenticated();
+      // Users can read their own review requests
+      allow read: if isAuthenticated() && (
+        isAdmin() || 
+        resource.data.createdBy == request.auth.uid
+      );
+      // Only admins can update/delete review requests
+      allow update, delete: if isAdmin();
+    }
+
+    // === HELPER FUNCTIONS ===
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isActive() {
+      return isAuthenticated() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.active == true;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin";
+    }
+
+    function isAuthorizedFor(companyId) {
+      let userDoc = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      return isAuthenticated() &&
+        userDoc.exists() &&
+        userDoc.data.companyIds != null &&
+        userDoc.data.companyIds.hasAny([companyId]);
+    }
+    
+    function canListChecks() {
+  return isAuthenticated() &&
+    size(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.companyIds) > 0;
+}
+
+    
+    function canReadEmployee(employeeId) {
+  let emp = get(/databases/$(database)/documents/employees/$(employeeId)).data;
+  return isAuthorizedFor(emp.companyId) ||
+    (emp.companyIds is list &&
+      emp.companyIds.hasAny(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.companyIds));
+}
+function canListEmployees() {
+  return isAuthenticated(); // you can restrict this more if needed later
+}
+
+
+    // ✅ NEW: safe read check using get() for checks
+   function canReadCheck(checkId) {
+  let userDoc = get(/databases/$(database)/documents/users/$(request.auth.uid));
+  let checkDoc = get(/databases/$(database)/documents/checks/$(checkId));
+
+  return isAuthenticated() &&
+    userDoc.exists() &&
+    checkDoc.exists() &&
+    isAuthorizedFor(checkDoc.data.companyId);
+}
+
+    function isAuthorizedDocId(companyId) {
+      return isAuthorizedFor(companyId);
+    }
+  }
+} 
