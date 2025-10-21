@@ -1,0 +1,70 @@
+{/* Divisions section */}
+<Divider sx={{ my: 2, width: '100%' }} />
+<Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', maxWidth: 700 }}>
+  <Typography variant="h6" sx={{ mt: 2, mb: 1 }}>Divisions</Typography>
+  {isEditing && (
+    <Button
+      variant="outlined"
+      size="small"
+      onClick={() => setShowDivisionForm(true)}
+    >
+      + Add Division
+    </Button>
+  )}
+</Box>
+
+{isEditing && showDivisionForm && (
+  <Box sx={{ width: '100%', maxWidth: 700, mb: 2 }}>
+    <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
+      <TextField
+        fullWidth
+        label="Division Name"
+        value={newDivision}
+        onChange={(e) => setNewDivision(e.target.value)}
+        placeholder="Enter division name"
+        size="small"
+      />
+      <Button
+        variant="contained"
+        size="small"
+        onClick={handleAddDivision}
+        disabled={!newDivision.trim() || editDivisions.includes(newDivision.trim())}
+      >
+        Add
+      </Button>
+      <Button
+        variant="outlined"
+        size="small"
+        onClick={() => {
+          setShowDivisionForm(false);
+          setNewDivision("");
+        }}
+      >
+        Cancel
+      </Button>
+    </Box>
+  </Box>
+)}
+
+{(isEditing ? editDivisions : profileCompany?.divisions || []).length === 0 ? (
+  <Typography variant="body2" color="text.secondary">No divisions added yet.</Typography>
+) : (
+  <Box sx={{ width: '100%', maxWidth: 700 }}>
+    {(isEditing ? editDivisions : profileCompany?.divisions || []).map((division, index) => (
+      <Box key={index} sx={{ border: '1px solid #eee', borderRadius: 1, p: 1, mt: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Typography variant="subtitle1">{division}</Typography>
+        {isEditing && (
+          <Button
+            variant="outlined"
+            color="error"
+            size="small"
+            onClick={() => handleRemoveDivision(division)}
+          >
+            Delete
+          </Button>
+        )}
+      </Box>
+    ))}
+  </Box>
+)}
+
