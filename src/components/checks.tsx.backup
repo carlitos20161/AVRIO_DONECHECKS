@@ -1,0 +1,330 @@
+import React, { useState, useEffect } from "react";
+import {
+  Box,
+  Button,
+  TextField,
+  Typography,
+  Paper,
+  Checkbox,
+  FormControlLabel,
+  Alert,
+  Snackbar,
+  Fade,
+  Divider
+} from "@mui/material";
+
+interface Employee {
+  id: string;
+  name: string;
+  clientId?: string;
+  payType?: string;
+  payRate?: number;
+  relationshipDetails?: Array<{
+    id: string;
+    clientId: string;
+    clientName: string;
+    payType: string;
+    payRate?: number;
+  }>;
+}
+
+interface BatchChecksProps {
+  onChecksCreated: () => void;
+  onGoToSection: (section: string) => void;
+}
+
+const BatchChecks: React.FC<BatchChecksProps> = ({ onGoToSection, onChecksCreated }) => {
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [companyClients, setCompanyClients] = useState<any[]>([]);
+  const [selectedClientId, setSelectedClientId] = useState<string>("multiple");
+  const [selectedEmployees, setSelectedEmployees] = useState<Record<string, boolean>>({});
+  const [inputs, setInputs] = useState<Record<string, any>>({});
+  const [isCreatingChecks, setIsCreatingChecks] = useState(false);
+  const [showSuccessMessage, setShowSuccessMessage] = useState(false);
+  const [showReviewPanel, setShowReviewPanel] = useState(false);
+  const [reviewData, setReviewData] = useState<any[]>([]);
+  const [floatingMenu, setFloatingMenu] = useState({
+    open: false,
+    companyName: "",
+    clientName: "",
+    companyId: "",
+    checkData: null as any
+  });
+
+  // Load employees and clients
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const response = await fetch("http://localhost:5004/api/employees");
+        const data = await response.json();
+        setEmployees(data);
+        
+        const clientsResponse = await fetch("http://localhost:5004/api/clients");
+        const clientsData = await clientsResponse.json();
+        setCompanyClients(clientsData);
+      } catch (error) {
+        console.error("Error loading data:", error);
+      }
+    };
+    
+    loadData();
+  }, []);
+
+  const handleInputChange = (employeeId: string, field: string, value: string) => {
+    setInputs(prev => ({
+      ...prev,
+      [employeeId]: {
+        ...prev[employeeId],
+        [field]: value
+      }
+    }));
+  };
+
+  const calculateAmount = (employee: Employee, input: any) => {
+    let total = 0;
+    
+    // Hourly calculation
+    const hours = parseFloat(input.hours || "0");
+    const otHours = parseFloat(input.otHours || "0");
+    const holidayHours = parseFloat(input.holidayHours || "0");
+    const rate = employee.payRate || 0;
+    
+    total += hours * rate;
+    total += otHours * rate * 1.5;
+    total += holidayHours * rate * 2;
+    
+    // Per diem calculation
+    if (input.perdiemAmount) {
+      total += parseFloat(input.perdiemAmount || "0");
+    }
+    
+    return total.toFixed(2);
+  };
+
+  const reviewChecks = () => {
+    const selectedEmpIds = Object.keys(selectedEmployees).filter(id => selectedEmployees[id]);
+    const reviewItems = selectedEmpIds.map(empId => {
+      const emp = employees.find(e => e.id === empId);
+      const input = inputs[empId] || {};
+      return {
+        employee: emp,
+        input,
+        calculatedAmount: parseFloat(calculateAmount(emp!, input))
+      };
+    });
+    
+    setReviewData(reviewItems);
+    setShowReviewPanel(true);
+  };
+
+  const handleCreateChecks = async () => {
+    setIsCreatingChecks(true);
+    try {
+      const response = await fetch("http://localhost:5004/api/create-checks", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          employees: reviewData,
+          clientId: selectedClientId
+        }),
+      });
+      
+      if (response.ok) {
+        setShowSuccessMessage(true);
+        setFloatingMenu({
+          open: true,
+          companyName: "Test Company",
+          clientName: "Test Client",
+          companyId: "test-id",
+          checkData: null
+        });
+      }
+    } catch (error) {
+      console.error("Error creating checks:", error);
+    } finally {
+      setIsCreatingChecks(false);
+    }
+  };
+
+  const filteredEmployees = employees.filter(emp => {
+    if (selectedClientId === "multiple") {
+      return emp.relationshipDetails && emp.relationshipDetails.length >= 1;
+    }
+    return emp.clientId === selectedClientId || 
+           emp.relationshipDetails?.some(rel => rel.clientId === selectedClientId);
+  });
+
+  return (
+    <Box sx={{ p: 3 }}>
+      <Typography variant="h4" gutterBottom>
+        Create Checks
+      </Typography>
+      
+      {/* Client Selection */}
+      <Box sx={{ mb: 3 }}>
+        <Typography variant="h6" gutterBottom>
+          Select Client
+        </Typography>
+        <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+          <Button
+            variant={selectedClientId === "multiple" ? "contained" : "outlined"}
+            onClick={() => setSelectedClientId("multiple")}
+          >
+            Multiple Clients
+          </Button>
+          {companyClients.map(client => (
+            <Button
+              key={client.id}
+              variant={selectedClientId === client.id ? "contained" : "outlined"}
+              onClick={() => setSelectedClientId(client.id)}
+            >
+              {client.name}
+            </Button>
+          ))}
+        </Box>
+      </Box>
+
+      {/* Employee List */}
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        {filteredEmployees.map(emp => (
+          <Paper key={emp.id} sx={{ p: 2 }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 2 }}>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={selectedEmployees[emp.id] || false}
+                    onChange={(e) => setSelectedEmployees(prev => ({
+                      ...prev,
+                      [emp.id]: e.target.checked
+                    }))}
+                  />
+                }
+                label={emp.name}
+              />
+            </Box>
+            
+            {selectedEmployees[emp.id] && (
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <TextField
+                  label="Hours"
+                  type="number"
+                  value={inputs[emp.id]?.hours || ""}
+                  onChange={(e) => handleInputChange(emp.id, "hours", e.target.value)}
+                  sx={{ width: 200 }}
+                />
+                <TextField
+                  label="OT Hours"
+                  type="number"
+                  value={inputs[emp.id]?.otHours || ""}
+                  onChange={(e) => handleInputChange(emp.id, "otHours", e.target.value)}
+                  sx={{ width: 200 }}
+                />
+                <TextField
+                  label="Holiday Hours"
+                  type="number"
+                  value={inputs[emp.id]?.holidayHours || ""}
+                  onChange={(e) => handleInputChange(emp.id, "holidayHours", e.target.value)}
+                  sx={{ width: 200 }}
+                />
+                <TextField
+                  label="Per Diem Amount"
+                  type="number"
+                  value={inputs[emp.id]?.perdiemAmount || ""}
+                  onChange={(e) => handleInputChange(emp.id, "perdiemAmount", e.target.value)}
+                  sx={{ width: 200 }}
+                />
+                <TextField
+                  label="Memo"
+                  value={inputs[emp.id]?.memo || ""}
+                  onChange={(e) => handleInputChange(emp.id, "memo", e.target.value)}
+                  sx={{ width: 300 }}
+                />
+                <Typography variant="h6" color="primary">
+                  Amount: ${calculateAmount(emp, inputs[emp.id] || {})}
+                </Typography>
+              </Box>
+            )}
+          </Paper>
+        ))}
+      </Box>
+
+      {/* Create Checks Button */}
+      {Object.values(selectedEmployees).some(selected => selected) && (
+        <Button
+          variant="contained"
+          size="large"
+          onClick={reviewChecks}
+          disabled={isCreatingChecks}
+          sx={{ mt: 3 }}
+        >
+          {isCreatingChecks ? "Creating Checks..." : "Review Checks"}
+        </Button>
+      )}
+
+      {/* Success Message */}
+      <Snackbar
+        open={showSuccessMessage}
+        autoHideDuration={2000}
+        onClose={() => setShowSuccessMessage(false)}
+      >
+        <Alert onClose={() => setShowSuccessMessage(false)} severity="success">
+          ��� Checks created successfully!
+        </Alert>
+      </Snackbar>
+
+      {/* Review Panel */}
+      {showReviewPanel && (
+        <Box
+          sx={{
+            position: "fixed",
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+            width: "90vw",
+            maxWidth: "800px",
+            maxHeight: "80vh"
+          }}
+        >
+          <Paper sx={{ p: 3, maxHeight: "80vh", overflow: "auto" }}>
+            <Typography variant="h5" gutterBottom>
+              Review Checks
+            </Typography>
+            
+            {reviewData.map((item, index) => (
+              <Box key={index} sx={{ mb: 2, p: 2, border: "1px solid #ccc", borderRadius: 1 }}>
+                <Typography variant="h6">{item.employee.name}</Typography>
+                <Typography>Hours: {item.input.hours || 0}</Typography>
+                <Typography>OT Hours: {item.input.otHours || 0}</Typography>
+                <Typography>Holiday Hours: {item.input.holidayHours || 0}</Typography>
+                <Typography>Per Diem: ${item.input.perdiemAmount || 0}</Typography>
+                <Typography variant="h6" color="primary">
+                  Total: ${item.calculatedAmount}
+                </Typography>
+              </Box>
+            ))}
+            
+            <Box sx={{ display: "flex", gap: 2, mt: 3 }}>
+              <Button
+                variant="contained"
+                onClick={handleCreateChecks}
+                disabled={isCreatingChecks}
+              >
+                {isCreatingChecks ? "Creating..." : "Create Checks"}
+              </Button>
+              <Button
+                variant="outlined"
+                onClick={() => setShowReviewPanel(false)}
+              >
+                Cancel
+              </Button>
+            </Box>
+          </Paper>
+        </Box>
+      )}
+    </Box>
+  );
+};
+
+export default BatchChecks;
