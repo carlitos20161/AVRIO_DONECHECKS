@@ -618,7 +618,7 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
                   <CardContent sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                     <PeopleIcon sx={{ fontSize: 40 }} />
                     <Box>
-                      <Typography variant="h6">Clients</Typography>
+                      <Typography variant="h6">Deparments</Typography>
                       <Typography variant="h4">{clients.length}</Typography>
                     </Box>
                   </CardContent>

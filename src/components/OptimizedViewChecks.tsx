@@ -1963,10 +1963,13 @@ const [userLoaded, setUserLoaded] = useState(false);
               let filteredWeeks: string[] = [];
               
               if (selectedWeekFilter === 'past') {
-                // Default view: Show the most recent weeks that have checks
-                filteredWeeks = weekKeys.slice(0, 3);
+                // Default view: Show current week, previous week, and next week
+                const previousWeek = getPastWeekKey();
+                const currentWeek = getCurrentWeekKey();
+                const nextWeek = getNextWeekKey();
+                filteredWeeks = [previousWeek, currentWeek, nextWeek];
                 
-                console.log('[DEBUG] Default view - showing most recent weeks with checks:', filteredWeeks);
+                console.log('[DEBUG] Default view - showing previous, current, next week:', filteredWeeks);
               } else if (selectedWeekFilter === 'all') {
                 // All Weeks - show only weeks that have checks (current year)
                 const currentYear = new Date().getFullYear().toString();
