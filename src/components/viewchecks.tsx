@@ -28,6 +28,7 @@ import {
 import { db, auth } from '../firebase';
 import { useLocation } from 'react-router-dom';
 import { TextField } from '@mui/material';
+import { getApiUrl } from '../config';
 
 
 interface Company {
@@ -479,9 +480,8 @@ const handleMarkCheckReviewed = async () => {
 
   const handlePrintWeek = async (weekKey: string) => {
     if (!selectedCompanyId) return;
-    const response = await fetch(
-                  `http://10.0.0.240:5004/api/print_week?companyId=${selectedCompanyId}&weekKey=${weekKey}`
-    );
+    const printWeekUrl = getApiUrl(`/api/print_week?companyId=${selectedCompanyId}&weekKey=${weekKey}`);
+    const response = await fetch(printWeekUrl);
     if (!response.ok) {
       alert('Error fetching PDF.');
       return;

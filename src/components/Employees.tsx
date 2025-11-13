@@ -6,7 +6,7 @@ import {
   Checkbox, ListItemText, IconButton, Divider, Radio, RadioGroup
 } from '@mui/material';
 import { db } from '../firebase';
-import { collection, getDocs, addDoc, updateDoc, doc, query, where } from 'firebase/firestore';
+import { collection, getDocs, addDoc, updateDoc, doc, query, where, onSnapshot } from 'firebase/firestore';
 import PersonIcon from '@mui/icons-material/Person';
 import WorkIcon from '@mui/icons-material/Work';
 import CalendarMonthIcon from '@mui/icons-material/CalendarMonth';
@@ -133,7 +133,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
         // Filter employees by companyIds on the client side for non-admin users
         let filteredEmployees = empDocs.map((d) => ({ id: d.id, ...d.data() } as Employee));
         
-                 if (currentRole !== 'admin') {
+                 if ((currentRole !== 'admin' && currentRole !== 'manager')) {
            // Filter to only show employees for the user's assigned companies
            filteredEmployees = filteredEmployees.filter(emp => {
              const empCompanyId = emp.companyId;
@@ -158,36 +158,51 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
         name: d.data().name,
         logoBase64: d.data().logoBase64 || null
       }));
-      if (currentRole !== 'admin') {
+      if ((currentRole !== 'admin' && currentRole !== 'manager')) {
         allCompanies = allCompanies.filter(c => companyIds.includes(c.id));
       }
       setCompanies(allCompanies);
 
-      // Only fetch clients if user is admin
-      if (currentRole === 'admin') {
-        try {
-          const cliSnap = await getDocs(collection(db, 'clients'));
-          const cliList: Client[] = cliSnap.docs.map(d => {
+    };
+    fetchData();
+
+    // Set up real-time listener for clients (admin/manager only)
+    let unsubscribeClients: (() => void) | undefined;
+    if ((currentRole === 'admin' || currentRole === 'manager')) {
+      try {
+        unsubscribeClients = onSnapshot(collection(db, 'clients'), (snapshot) => {
+          const cliList: Client[] = snapshot.docs.map(d => {
             const data = d.data() as any;
             return {
               id: d.id,
               name: data.name,
               address: data.address,
-              division: data.division,  // Add division field
+              division: data.division,
               companyIds: data.companyId || []
             };
           });
           setClients(cliList);
-        } catch (error) {
-          console.error('[DEBUG] Error fetching clients:', error);
+          console.log('[Employees] 🔄 Clients updated in real-time:', cliList.length);
+        }, (error) => {
+          console.error('[DEBUG] Error in clients listener:', error);
           setClients([]);
-        }
-      } else {
-        // For non-admin users, set empty clients array
+        });
+      } catch (error) {
+        console.error('[DEBUG] Error setting up clients listener:', error);
         setClients([]);
       }
+    } else {
+      // For non-admin users, set empty clients array
+      setClients([]);
+    }
+
+    // Cleanup function
+    return () => {
+      if (unsubscribeClients) {
+        unsubscribeClients();
+        console.log('[Employees] 🧹 Cleaned up clients listener');
+      }
     };
-    fetchData();
   }, [currentRole, companyIds]);
 
   const getCompanyName = (id?: string | null): string => {
@@ -222,8 +237,13 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
         return;
       }
       for (const rel of newEmployee.clientPayTypeRelationships) {
-        if (!rel.clientId || !rel.payRate) {
-          alert('Please complete all client relationship fields');
+        if (!rel.clientId) {
+          alert('Please select a client for all relationships');
+          return;
+        }
+        // Only require pay rate for hourly employees
+        if (rel.payType === 'hourly' && (!rel.payRate || rel.payRate.trim() === '')) {
+          alert('Please enter a pay rate for all hourly relationships');
           return;
         }
       }
@@ -458,7 +478,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
     try {
       // Fetch checks for this employee, but only if user has access
       let checksSnap;
-      if (currentRole === 'admin') {
+      if ((currentRole === 'admin' || currentRole === 'manager')) {
         // Admin can fetch all checks for the employee
         checksSnap = await getDocs(query(collection(db, 'checks'), where('employeeId', '==', emp.id)));
       } else {
@@ -527,7 +547,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
             >
               ← Back to Companies
             </Button>
-            {currentRole === 'admin' && (
+            {(currentRole === 'admin' || currentRole === 'manager') && (
               <Button 
                 variant="contained" 
                 onClick={() => setOpenAdd(true)}
@@ -761,7 +781,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
                   {emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 0 
-                    ? emp.clientPayTypeRelationships.map(rel => `${rel.clientName} (${rel.payType})`).join(' + ')
+                    ? emp.clientPayTypeRelationships.map(rel => `${getClientName(rel.clientId)} (${rel.payType})`).join(' + ')
                     : getClientName(emp.clientId) || 'No Client'
                   }
                 </Typography>
@@ -773,7 +793,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                     {emp.clientPayTypeRelationships.map((rel, idx) => (
                       <Chip
                         key={rel.id}
-                        label={`${rel.clientName} (${rel.payType})`}
+                        label={`${getClientName(rel.clientId)} (${rel.payType})`}
                         size="small"
                         color={rel.active ? "primary" : "default"}
                         variant={rel.active ? "filled" : "outlined"}
@@ -798,14 +818,37 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                     {emp.active ? 'Active' : 'Inactive'}
 </Typography>
 
-                {currentRole === 'admin' && (
+                {(currentRole === 'admin' || currentRole === 'manager') && (
+                  <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
                   <Button
                     variant="outlined"
-                    sx={{ mt: 1 }}
                     onClick={() => handleCardClick(emp)}
                   >
                     Edit Employee
                   </Button>
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={emp.active}
+                          onChange={(e) => handleToggleActive(emp.id, e.target.checked)}
+                          color="primary"
+                          size="small"
+                        />
+                      }
+                      label={
+                        <Typography 
+                          variant="body2" 
+                          sx={{ 
+                            fontWeight: 'bold', 
+                            color: emp.active ? 'green' : 'red',
+                            fontSize: '0.75rem'
+                          }}
+                        >
+                          {emp.active ? 'Active' : 'Inactive'}
+                        </Typography>
+                      }
+                    />
+                  </Box>
                 )}
               </Box>
             ))
@@ -814,7 +857,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
       ) : (
         <>
           <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
-            {currentRole === 'admin' && (
+            {(currentRole === 'admin' || currentRole === 'manager') && (
               <Button variant="contained" onClick={() => setOpenAdd(true)}>
                 + Add Employee
               </Button>
@@ -958,7 +1001,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
       )}
 
       {/* Add Dialog (admin only) */}
-      {currentRole === 'admin' && (
+      {(currentRole === 'admin' || currentRole === 'manager') && (
         <Dialog open={openAdd} onClose={() => setOpenAdd(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Create New Employee</DialogTitle>
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -1576,7 +1619,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                 label="Name"
                 value={profileEdit.name || ''}
                 onChange={e => setProfileEdit({ ...profileEdit, name: e.target.value })}
-                disabled={currentRole !== 'admin'}
+                disabled={(currentRole !== 'admin' && currentRole !== 'manager')}
                 sx={{ mb: 2 }}
               />
               <TextField
@@ -1584,7 +1627,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                 label="Position"
                 value={profileEdit.position || ''}
                 onChange={e => setProfileEdit({ ...profileEdit, position: e.target.value })}
-                disabled={currentRole !== 'admin'}
+                disabled={(currentRole !== 'admin' && currentRole !== 'manager')}
                 sx={{ mb: 2 }}
               />
               <TextField
@@ -1592,7 +1635,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                 label="Address"
                 value={profileEdit.address || ''}
                 onChange={e => setProfileEdit({ ...profileEdit, address: e.target.value })}
-                disabled={currentRole !== 'admin'}
+                disabled={(currentRole !== 'admin' && currentRole !== 'manager')}
                 sx={{ mb: 2 }}
               />
               {(profileEdit.payTypes && profileEdit.payTypes.includes('hourly')) && (
@@ -1602,7 +1645,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                   type="number"
                   value={profileEdit.payRate || ''}
                   onChange={e => setProfileEdit({ ...profileEdit, payRate: e.target.value })}
-                  disabled={currentRole !== 'admin'}
+                  disabled={(currentRole !== 'admin' && currentRole !== 'manager')}
                   sx={{ mb: 2 }}
                 />
               )}
@@ -1619,7 +1662,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                       payType: selectedTypes[0] || 'hourly'
                     });
                   }}
-                  disabled={currentRole !== 'admin'}
+                  disabled={(currentRole !== 'admin' && currentRole !== 'manager')}
                   renderValue={(selected) => (selected as string[]).map(type => 
                     type === 'hourly' ? 'Hourly' : 'Per Diem'
                   ).join(', ')}
@@ -1648,7 +1691,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                 InputLabelProps={{ shrink: true }}
                 value={profileEdit.startDate || ''}
                 onChange={e => setProfileEdit({ ...profileEdit, startDate: e.target.value })}
-                disabled={currentRole !== 'admin'}
+                disabled={(currentRole !== 'admin' && currentRole !== 'manager')}
                 sx={{ mb: 2 }}
               />
               <Typography variant="body2" sx={{ mb: 1 }}>
@@ -1678,7 +1721,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
     <Switch
       checked={!!profileEdit.active}
       onChange={e => setProfileEdit({ ...profileEdit, active: e.target.checked })}
-      disabled={currentRole !== 'admin'}
+      disabled={(currentRole !== 'admin' && currentRole !== 'manager')}
       color="primary"
     />
   }
@@ -1745,7 +1788,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
           )}
         </DialogContent>
         <DialogActions>
-          {currentRole === 'admin' && (
+          {(currentRole === 'admin' || currentRole === 'manager') && (
             <Button
               onClick={async () => {
                 if (!profileEdit) return;

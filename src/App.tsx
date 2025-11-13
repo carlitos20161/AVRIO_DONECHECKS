@@ -55,9 +55,9 @@ const drawerWidth = 220;
 
 // Base menu items
 const baseMenuItems = [
-  { text: 'Dashboard', icon: <DashboardIcon />, section: 'Dashboard' },
-  { text: 'Create Checks', icon: <ReceiptIcon />, section: 'Checks' },
-  { text: 'View Checks', icon: <VisibilityIcon />, section: 'View Checks' },
+         { text: 'Dashboard', icon: <DashboardIcon />, section: 'Dashboard' },
+         { text: 'Create Checks', icon: <ReceiptIcon />, section: 'Checks' },
+         { text: 'View Checks', icon: <VisibilityIcon />, section: 'View Checks' },
   { text: 'Report', icon: <AssessmentIcon />, section: 'Report', adminOnly: true },
 ];
 
@@ -94,6 +94,7 @@ function App() {
   const [selectedSection, setSelectedSection] = useState('Dashboard');
   const [currentRole, setCurrentRole] = useState<string>('user');
   const [companyIds, setCompanyIds] = useState<string[]>([]);
+  const [visibleClientIds, setVisibleClientIds] = useState<string[]>([]); // Track which clients user can see
   const [userId, setUserId] = useState<string | null>(null);
   const [createSubmenuOpen, setCreateSubmenuOpen] = useState(false);
 
@@ -102,8 +103,8 @@ function App() {
   // Filter menu items based on user role
   const mainMenuItems = useMemo(() => {
     return baseMenuItems.filter(item => {
-      // Show admin-only items only to admins
-      if (item.adminOnly && currentRole !== 'admin') {
+      // Show admin-only items to admins and managers
+      if (item.adminOnly && currentRole !== 'admin' && currentRole !== 'manager') {
         return false;
       }
       return true;
@@ -184,9 +185,9 @@ function App() {
     }
   }, [selectedSection]);
 
-  // Redirect non-admin users away from Report section
+  // Redirect non-admin/manager users away from Report section
   useEffect(() => {
-    if (selectedSection === 'Report' && currentRole !== 'admin') {
+    if (selectedSection === 'Report' && currentRole !== 'admin' && currentRole !== 'manager') {
       setSelectedSection('Dashboard');
     }
   }, [selectedSection, currentRole]);
@@ -200,6 +201,7 @@ function App() {
       setCurrentRole('user');
       setUserId(null);
       setCompanyIds([]);
+      setVisibleClientIds([]); // Clear visible client IDs
       setViewFilter({});
       setSelectedSection('Dashboard');
       if (firebaseUser) {
@@ -211,6 +213,7 @@ function App() {
             setCurrentRole(data.role || 'user');
             setUserId(firebaseUser.uid);
             setCompanyIds(data.companyIds || []);
+            setVisibleClientIds(data.visibleClientIds || []); // Load visible client IDs
             console.log('[CHECKPOINT] User doc loaded:', data);
             
             // Fetch notifications after user data is loaded
@@ -241,6 +244,7 @@ function App() {
       const userData = userSnap.data();
       setCurrentRole(userData.role || 'user');
       setCompanyIds(userData.companyIds || []);
+      setVisibleClientIds(userData.visibleClientIds || []); // Load visible client IDs
     };
     fetchUser();
   }, []);
@@ -267,13 +271,13 @@ function App() {
 
   const { data: users, loading: usersLoading } = useOptimizedData<any>('users', {}, usersOptions);
 
-  // Always call hooks, but skip fetching if companyIds not ready (for non-admins)
-  const shouldFetch = currentRole === 'admin' || (companyIds && companyIds.length > 0);
+  // Always call hooks, but skip fetching if companyIds not ready (for non-admins/managers)
+  const shouldFetch = currentRole === 'admin' || currentRole === 'manager' || (companyIds && companyIds.length > 0);
   const { data: companies, loading: companiesLoading } = useOptimizedData<any>('companies', {}, { ...companiesOptions, skip: !shouldFetch });
   const { data: banks, loading: banksLoading } = useOptimizedData<any>('banks', {}, { ...companiesOptions, skip: !shouldFetch });
   const { data: clients, loading: clientsLoading } = useOptimizedData<any>('clients', {}, { ...companiesOptions, skip: !shouldFetch });
   // In the Dashboard checks query/filter logic:
-  const checksFilter = currentRole === 'admin'
+  const checksFilter = (currentRole === 'admin' || currentRole === 'manager')
   ? {}
   : (companyIds.length > 0
       ? { companyId: companyIds }
@@ -396,8 +400,8 @@ function App() {
               </ListItemButton>
             ))}
             
-            {/* Create Submenu (Admin Only) */}
-            {currentRole === 'admin' && (
+            {/* Create Submenu (Admin and Manager) */}
+            {(currentRole === 'admin' || currentRole === 'manager') && (
               <>
                 <ListItemButton
                   onClick={() => setCreateSubmenuOpen(!createSubmenuOpen)}
@@ -429,8 +433,8 @@ function App() {
               </>
             )}
             
-            {/* Employees for non-admin users */}
-            {currentRole !== 'admin' && (
+            {/* Employees for regular users only */}
+            {currentRole === 'user' && (
               <ListItemButton
                 selected={selectedSection === 'Employees'}
                 onClick={() => {
@@ -470,10 +474,16 @@ function App() {
             />
           )}
 
-          {selectedSection === 'Companies' && <Companies />}
-          {selectedSection === 'Banks' && <Bank />}
-          {selectedSection === 'Users' && <UsersPage />}
-          {selectedSection === 'Clients' && <Clients companyIds={companyIds} />}
+          {selectedSection === 'Companies' && <Companies currentRole={currentRole} />}
+          {selectedSection === 'Banks' && <Bank currentRole={currentRole} />}
+          {selectedSection === 'Users' && <UsersPage currentRole={currentRole} />}
+          {selectedSection === 'Clients' && (
+            <Clients 
+              companyIds={companyIds} 
+              currentRole={currentRole} 
+              visibleClientIds={visibleClientIds}
+            />
+          )}
           {selectedSection === 'Employees' && (
             <Employees currentRole={currentRole} companyIds={companyIds} />
           )}
@@ -498,10 +508,17 @@ function App() {
               refetchChecks={refetchChecks}
               currentRole={currentRole}
               companyIds={companyIds}
+              visibleClientIds={visibleClientIds}
             />
           )}
 
-          {selectedSection === 'Report' && currentRole === 'admin' && <Report />}
+          {selectedSection === 'Report' && (currentRole === 'admin' || currentRole === 'manager') && (
+            <Report 
+              currentRole={currentRole} 
+              companyIds={companyIds} 
+              visibleClientIds={visibleClientIds}
+            />
+          )}
         </Container>
       </Box>
 

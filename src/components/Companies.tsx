@@ -59,7 +59,11 @@ interface Bank {
   companyId?: string;
 }
 
-const CompaniesManager: React.FC = () => {
+interface CompaniesManagerProps {
+  currentRole: string;
+}
+
+const CompaniesManager: React.FC<CompaniesManagerProps> = ({ currentRole }) => {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [banks, setBanks] = useState<Bank[]>([]);
   const [loading, setLoading] = useState(true);
@@ -121,6 +125,9 @@ const CompaniesManager: React.FC = () => {
   // Available items for selection
   const [availableBanks, setAvailableBanks] = useState<Bank[]>([]);
   const [availableClients, setAvailableClients] = useState<Client[]>([]);
+  const [newClientName, setNewClientName] = useState("");
+  const [newClientAddress, setNewClientAddress] = useState("");
+  const [isCreatingClient, setIsCreatingClient] = useState(false);
 
 
   useEffect(() => {
@@ -591,6 +598,8 @@ setClients(clList);
       
       setAvailableClients(unassignedClients);
       setShowClientSelection(true);
+      setNewClientName("");
+      setNewClientAddress("");
     } catch (err) {
       console.error(err);
       alert("❌ Failed to load available clients");
@@ -613,10 +622,48 @@ setClients(clList);
       setProfileClients(clientSnap.docs.map(d => ({ id: d.id, ...d.data() })));
       
       setShowClientSelection(false);
-      showSnackbar("✅ Client assigned successfully!", "success");
+      showSnackbar("✅ Department assigned successfully!", "success");
     } catch (err) {
       console.error(err);
       showSnackbar("❌ Failed to assign client", "error");
+    }
+  };
+
+  const handleCreateClient = async () => {
+    if (!profileCompany) return;
+    if (!newClientName.trim()) {
+      showSnackbar("Please enter a client name", "error");
+      return;
+    }
+    try {
+      setIsCreatingClient(true);
+      const newClientData = {
+        name: newClientName.trim(),
+        address: newClientAddress.trim(),
+        companyIds: [profileCompany.id],
+        createdAt: serverTimestamp(),
+      };
+      const docRef = await addDoc(collection(db, "clients"), newClientData);
+
+      const createdClient: Client = {
+        id: docRef.id,
+        name: newClientData.name,
+        address: newClientData.address,
+        companyIds: newClientData.companyIds,
+      };
+
+      setClients(prev => [...prev, createdClient]);
+      setProfileClients(prev => [...prev, { ...createdClient }]);
+
+      setNewClientName("");
+      setNewClientAddress("");
+      setShowClientSelection(false);
+      showSnackbar("✅ Department created and assigned successfully!", "success");
+    } catch (err) {
+      console.error(err);
+      showSnackbar("❌ Failed to create client", "error");
+    } finally {
+      setIsCreatingClient(false);
     }
   };
 
@@ -627,7 +674,7 @@ setClients(clList);
       
       // Update local state
       setProfileClients(prev => prev.filter(c => c.id !== clientId));
-      showSnackbar("✅ Client deleted successfully!", "success");
+      showSnackbar("✅ Department deleted successfully!", "success");
     } catch (err) {
       console.error(err);
       showSnackbar("❌ Failed to delete client", "error");
@@ -647,9 +694,11 @@ setClients(clList);
     <Paper sx={{ p: 3, maxWidth: 1000, margin: "0 auto" }}>
       <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 3 }}>
         <Typography variant="h4">Companies</Typography>
+        {currentRole === 'admin' && (
         <Button variant="contained" color="primary" onClick={handleOpenForm}>
           + Create New Company
         </Button>
+        )}
       </Box>
   
       <Box sx={{ display: "flex", flexDirection: "column", gap: 3 }}>
@@ -687,6 +736,7 @@ setClients(clList);
           View Profile
         </Button>
 
+        {currentRole === 'admin' && (
         <Button
           variant="outlined"
           color="error"
@@ -696,6 +746,7 @@ setClients(clList);
         >
           Delete
         </Button>
+        )}
       </Box>
 
       {/* Banks */}
@@ -747,19 +798,21 @@ setClients(clList);
         fullWidth
         maxWidth="sm"
       >
-        <DialogTitle>Create Company</DialogTitle>
-        <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <DialogTitle sx={{ pb: 1, pt: 2, fontSize: '1.5rem', lineHeight: '3' }}>Create Company</DialogTitle>
+        <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 6 }}>
           <TextField
             fullWidth
             label="Company Name"
             value={name}
             onChange={(e) => setName(e.target.value)}
+            autoComplete="off"
           />
           <TextField
             fullWidth
             label="Company Address"
             value={address}
             onChange={(e) => setAddress(e.target.value)}
+            autoComplete="off"
           />
           <Button variant="contained" component="label">
             Upload Company Logo
@@ -823,7 +876,7 @@ setClients(clList);
         <DialogTitle>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             Company Profile
-            {!isEditing && (
+            {!isEditing && currentRole === 'admin' && (
               <Button
                 variant="outlined"
                 color="primary"
@@ -1042,88 +1095,54 @@ setClients(clList);
                 </Box>
               )}
               <Divider sx={{ my: 2, width: '100%' }} />
+              {/* Clients section */}
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', maxWidth: 700 }}>
-              <Typography variant="h6" sx={{ mt: 2, mb: 1 }}>Departments</Typography>
-                
+                <Typography variant="h6" sx={{ mt: 2, mb: 1 }}>Clients</Typography>
+                {isEditing && (
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={() => setShowDivisionForm(true)}
+                  >
+                    + Add Client
+                  </Button>
+                )}
               </Box>
 
-              
-              
-
-              
-              {profileClients.length === 0 ? (
-                <Typography variant="body2" color="text.secondary">No clients assigned to this company.</Typography>
-              ) : (
-                <Box sx={{ width: '100%', maxWidth: 700 }}>
-                  {profileClients.map(cl => (
-                    <Box key={cl.id} sx={{ border: '1px solid #eee', borderRadius: 1, p: 1, mt: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Box>
-                      <Typography variant="subtitle1">{cl.name}</Typography>
-                      <Typography variant="body2" color="text.secondary">{cl.address || ''}</Typography>
-                      </Box>
-                      {isEditing && (
-                        <Button
-                          variant="outlined"
-                          color="error"
-                          size="small"
-                          onClick={() => handleDeleteClient(cl.id)}
-                        >
-                          Delete
-                        </Button>
-                      )}
-                    </Box>
-                  ))}
+              {isEditing && showDivisionForm && (
+                <Box sx={{ width: '100%', maxWidth: 700, mb: 2 }}>
+                  <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
+                    <TextField
+                      fullWidth
+                      label="Client Name"
+                      value={newDivision}
+                      onChange={(e) => setNewDivision(e.target.value)}
+                      placeholder="Enter Client Name"
+                      size="small"
+                    />
+                    <Button
+                      variant="contained"
+                      size="small"
+                      onClick={handleAddDivision}
+                      disabled={!newDivision.trim() || editDivisions.includes(newDivision.trim())}
+                    >
+                      Add
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() => {
+                        setShowDivisionForm(false);
+                        setNewDivision("");
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </Box>
                 </Box>
               )}
-              {/* Divisions section */}
-<Divider sx={{ my: 2, width: '100%' }} />
-<Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', maxWidth: 700 }}>
-  <Typography variant="h6" sx={{ mt: 2, mb: 1 }}>Clients</Typography>
-  {isEditing && (
-    <Button
-      variant="outlined"
-      size="small"
-      onClick={() => setShowDivisionForm(true)}
-    >
-      + Add Client
-    </Button>
-  )}
-</Box>
 
-{isEditing && showDivisionForm && (
-  <Box sx={{ width: '100%', maxWidth: 700, mb: 2 }}>
-    <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
-      <TextField
-        fullWidth
-        label="Client Name"
-        value={newDivision}
-        onChange={(e) => setNewDivision(e.target.value)}
-        placeholder="Enter Client Name"
-        size="small"
-      />
-      <Button
-        variant="contained"
-        size="small"
-        onClick={handleAddDivision}
-        disabled={!newDivision.trim() || editDivisions.includes(newDivision.trim())}
-      >
-        Add
-      </Button>
-      <Button
-        variant="outlined"
-        size="small"
-        onClick={() => {
-          setShowDivisionForm(false);
-          setNewDivision("");
-        }}
-      >
-        Cancel
-      </Button>
-    </Box>
-  </Box>
-)}
-
-{(() => {
+              {(() => {
   // Get divisions from clients that belong to this company
   // Check different possible field names for division
   const clientDivisions = profileClients.map(client => {
@@ -1172,6 +1191,37 @@ setClients(clList);
     </Box>
   );
 })()}
+              {/* Departments section */}
+              <Divider sx={{ my: 2, width: '100%' }} />
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', maxWidth: 700 }}>
+                <Typography variant="h6" sx={{ mt: 2, mb: 1 }}>Departments</Typography>
+                
+              </Box>
+
+              {profileClients.length === 0 ? (
+                <Typography variant="body2" color="text.secondary">No departments assigned to this company.</Typography>
+              ) : (
+                <Box sx={{ width: '100%', maxWidth: 700 }}>
+                  {profileClients.map(cl => (
+                    <Box key={cl.id} sx={{ border: '1px solid #eee', borderRadius: 1, p: 1, mt: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Box>
+                        <Typography variant="subtitle1">{cl.name}</Typography>
+                        <Typography variant="body2" color="text.secondary">{cl.address || ''}</Typography>
+                      </Box>
+                      {isEditing && (
+                        <Button
+                          variant="outlined"
+                          color="error"
+                          size="small"
+                          onClick={() => handleDeleteClient(cl.id)}
+                        >
+                          Delete
+                        </Button>
+                      )}
+                    </Box>
+                  ))}
+                </Box>
+              )}
             </Box>
             
           )}
@@ -1236,10 +1286,37 @@ setClients(clList);
 
       {/* Client Selection Dialog */}
       <Dialog open={showClientSelection} onClose={() => setShowClientSelection(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Select Client to Assign</DialogTitle>
+        <DialogTitle>Select Department to Assign</DialogTitle>
         <DialogContent>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mb: 3 }}>
+            <Typography variant="subtitle1">Create New Department</Typography>
+            <TextField
+              fullWidth
+              size="small"
+              label="Department Name"
+              value={newClientName}
+              onChange={(e) => setNewClientName(e.target.value)}
+              autoComplete="off"
+            />
+            <TextField
+              fullWidth
+              size="small"
+              label="Department Address"
+              value={newClientAddress}
+              onChange={(e) => setNewClientAddress(e.target.value)}
+              autoComplete="off"
+            />
+            <Button
+              variant="contained"
+              size="small"
+              onClick={handleCreateClient}
+              disabled={isCreatingClient || !newClientName.trim()}
+            >
+              {isCreatingClient ? "Creating..." : "Create & Assign Department"}
+            </Button>
+          </Box>
           {availableClients.length === 0 ? (
-            <Typography>No unassigned clients available.</Typography>
+            <Typography>No unassigned departments available.</Typography>
           ) : (
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
               {availableClients.map(client => (

@@ -20,6 +20,7 @@
     "@types/xlsx": "^0.0.35",
     "crypto-js": "^4.2.0",
     "date-fns": "^4.1.0",
+    "exceljs": "^4.4.0",
     "express": "^5.1.0",
     "file-saver": "^2.0.5",
     "firebase": "^12.0.0",

@@ -264,9 +264,22 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
     calculatedAmount: number;
     hourlyTotal: number;
     perDiemTotal: number;
+    clientsWorked?: string[];
+    clientBreakdown?: Array<{
+      clientName: string;
+      companyName: string;
+      amount: number;
+      hourlyAmount: number;
+      perDiemAmount: number;
+      payType: string;
+      details: Array<{label: string; value: string}>;
+    }>;
   }>>([]);
   const [clientSearchTerm, setClientSearchTerm] = useState<string>("");
   const [clientStatusFilter, setClientStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  
+  // Employee search
+  const [employeeSearchTerm, setEmployeeSearchTerm] = useState<string>("");
   
   // Floating menu state
   const [floatingMenu, setFloatingMenu] = useState<FloatingMenuState>({
@@ -314,7 +327,7 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
       const userDocRef = doc(db, "users", user.uid);
       const userSnap = await getDoc(userDocRef);
       if (!userSnap.exists()) return;
-      
+
       const userData = userSnap.data();
       const role = userData.role || 'user';
       const companyIds: string[] = userData.companyIds || [];
@@ -434,6 +447,68 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
     return matchesSearch && matchesStatus;
   });
 
+  // Filter clients to only show those that have at least ONE active employee
+  // NEW: Show ALL clients and ALL employees who work for each client (even if they work for multiple clients)
+  const clientsWithActiveEmployees = filteredCompanyClients.filter(client => {
+    // Check if this client has any active employees (regardless of how many relationships they have)
+    const hasActiveEmployees = employees.some(emp => {
+      if (!emp.active) return false; // Employee must be active
+      
+      // Check if employee has at least one active relationship with this client
+      const hasActiveRelationshipWithThisClient = emp.clientPayTypeRelationships?.some(rel => 
+        rel.clientId === client.id && rel.active
+      );
+      
+      // Check legacy fields - only count if employee has NO relationships
+      const hasLegacyClient = emp.clientId === client.id;
+      const legacyEmployeeWithThisClient = hasLegacyClient && (!emp.clientPayTypeRelationships || emp.clientPayTypeRelationships.length === 0);
+      
+      return hasActiveRelationshipWithThisClient || legacyEmployeeWithThisClient;
+    });
+    
+    return hasActiveEmployees;
+  }).sort((a, b) => {
+    const divisionA = (a.division || "").toLowerCase();
+    const divisionB = (b.division || "").toLowerCase();
+
+    if (divisionA !== divisionB) {
+      return divisionA.localeCompare(divisionB);
+    }
+
+    const clientNameA = (a.name || "").toLowerCase();
+    const clientNameB = (b.name || "").toLowerCase();
+    return clientNameA.localeCompare(clientNameB);
+  }); // Sort by division (client) first, then by department name
+
+  // Debug logging for client filtering
+  useEffect(() => {
+    if (employees.length > 0 && clientsWithActiveEmployees.length > 0) {
+      console.log('🔍 [Client Filtering] Results:');
+      console.log(`  - Total clients: ${filteredCompanyClients.length}`);
+      console.log(`  - Clients with active employees: ${clientsWithActiveEmployees.length}`);
+      console.log(`  - Clients with active employees:`, clientsWithActiveEmployees.map(c => c.name));
+      
+      // Log employee counts per client
+      clientsWithActiveEmployees.forEach(client => {
+        const employeeCount = employees.filter(emp => {
+          if (!emp.active) return false;
+          
+          // Check if employee has any active relationship with this client
+          const hasActiveRelationshipWithThisClient = emp.clientPayTypeRelationships?.some(rel => 
+            rel.clientId === client.id && rel.active
+          );
+          
+          // Check legacy fields - only count if employee has NO relationships
+          const hasLegacyClient = emp.clientId === client.id;
+          const legacyEmployeeWithSingleClient = hasLegacyClient && (!emp.clientPayTypeRelationships || emp.clientPayTypeRelationships.length === 0);
+          
+          return hasActiveRelationshipWithThisClient || legacyEmployeeWithSingleClient;
+        }).length;
+        console.log(`    - ${client.name}: ${employeeCount} employees`);
+      });
+    }
+  }, [employees, clientsWithActiveEmployees]);
+
  // Clear all tab data when company changes
 useEffect(() => {
   setTabData({});
@@ -455,13 +530,10 @@ useEffect(() => {
     }) || false;
     
     // Client filter (if a specific client is selected)
-    if (selectedClientId && selectedClientId !== 'multiple') {
+    if (selectedClientId) {
       const matchClient = e.clientPayTypeRelationships?.some(rel => rel.clientId === selectedClientId) ||
                          e.clientId === selectedClientId;
       return matchCompany && matchClient;
-    } else if (selectedClientId === 'multiple') {
-      // Multiple clients tab: show all employees for the company
-      return matchCompany;
     }
     
     return matchCompany;
@@ -475,12 +547,7 @@ useEffect(() => {
     console.log(`  - emp.payType: ${emp.payType}`);
     console.log(`  - emp.payTypes:`, emp.payTypes);
     
-    if (selectedClientId === 'multiple') {
-      // Multiple clients tab: allow both payment methods
-      const result = emp.payTypes && emp.payTypes.length > 1 ? emp.payTypes : [emp.payType];
-      console.log(`  - Multiple clients tab, returning:`, result);
-      return result;
-    } else if (selectedClientId) {
+    if (selectedClientId) {
       // Single client tab: STRICTLY use only the client's pay type
       const selectedClient = companyClients.find(c => c.id === selectedClientId);
       console.log(`  - Selected client:`, selectedClient?.name);
@@ -518,15 +585,12 @@ useEffect(() => {
 
   // Helper function to get default relationship IDs based on selected client tab
   const getDefaultRelationshipIds = (emp: Employee) => {
-    if (selectedClientId === 'multiple') {
-      // Multiple clients tab: automatically select all active relationships
-      return emp.clientPayTypeRelationships?.filter(rel => rel.active).map(rel => rel.id) || [];
-    } else if (selectedClientId) {
-      // Single client tab: automatically select the relationship for this client
-      const relationship = emp.clientPayTypeRelationships?.find(rel => rel.clientId === selectedClientId);
-      if (relationship) {
-        return [relationship.id];
-      }
+    if (selectedClientId) {
+      // Auto-select ALL relationships for the current client (an employee might have multiple pay types with same client)
+      const clientRelationships = emp.clientPayTypeRelationships?.filter(rel => 
+        rel.clientId === selectedClientId && rel.active
+      ) || [];
+      return clientRelationships.map(rel => rel.id);
     }
     // Default fallback
     return [];
@@ -571,13 +635,13 @@ const clientEmployees = filteredEmployees.filter(emp => {
       
       console.log("🔍 Client employees:", clientEmployees.length);
       
-      const newSelectedEmployees = { ...selectedEmployees };
-      const newInputs = { ...inputs };
+      // Track tab data to distribute relationship-specific data across tabs
+      const newTabData: { [key: string]: { selectedEmployees: { [key: string]: boolean }, inputs: { [key: string]: any } } } = {};
       let foundPreviousData = false;
       
       // For each employee, find their most recent check for this client
       clientEmployees.forEach(emp => {
-        let latestCheck = null;
+        let latestCheck: any = null;
         
         if (selectedClientId === 'multiple') {
           // For multiple clients, find the most recent check with multiple relationships
@@ -604,68 +668,141 @@ const clientEmployees = filteredEmployees.filter(emp => {
           console.log(`🔍 Found previous check for ${emp.name}:`, latestCheck);
           foundPreviousData = true;
           
-          // Select the employee
-          newSelectedEmployees[emp.id] = true;
-          
-          // Get default settings
-          const defaultPaymentMethods = getDefaultPaymentMethods(emp);
-          const defaultRelationshipIds = getDefaultRelationshipIds(emp);
-          
-          // Populate with previous check data
-          const empInput: any = {
-            paymentMethods: defaultPaymentMethods,
-            selectedRelationshipIds: defaultRelationshipIds,
-            hours: latestCheck.hours?.toString() || "",
-            otHours: latestCheck.otHours?.toString() || "",
-            holidayHours: latestCheck.holidayHours?.toString() || "",
-            memo: latestCheck.memo || "",
-            perdiemAmount: latestCheck.perdiemAmount?.toString() || "",
-            perdiemBreakdown: latestCheck.perdiemBreakdown || false,
-            perdiemMonday: latestCheck.perdiemMonday?.toString() || "",
-            perdiemTuesday: latestCheck.perdiemTuesday?.toString() || "",
-            perdiemWednesday: latestCheck.perdiemWednesday?.toString() || "",
-            perdiemThursday: latestCheck.perdiemThursday?.toString() || "",
-            perdiemFriday: latestCheck.perdiemFriday?.toString() || "",
-            perdiemSaturday: latestCheck.perdiemSaturday?.toString() || "",
-            perdiemSunday: latestCheck.perdiemSunday?.toString() || "",
-          };
-          
-          // If employee has relationships, also populate relationship-specific fields
-          if (emp.clientPayTypeRelationships) {
-            emp.clientPayTypeRelationships.forEach(relationship => {
-              if (selectedClientId === 'multiple' || relationship.clientId === selectedClientId) {
+          // If the check has relationshipDetails, distribute data across tabs
+          if (latestCheck.relationshipDetails && latestCheck.relationshipDetails.length > 0) {
+            console.log(`🔍 Distributing relationship data for ${emp.name} across ${latestCheck.relationshipDetails.length} tabs`);
+            
+            // Process each relationship and populate the corresponding tab
+            latestCheck.relationshipDetails.forEach((relDetail: any) => {
+              const tabId = relDetail.clientId;
+              
+              // Initialize tab data if it doesn't exist
+              if (!newTabData[tabId]) {
+                newTabData[tabId] = {
+                  selectedEmployees: {},
+                  inputs: {}
+                };
+              }
+              
+              // Select this employee in this tab
+              newTabData[tabId].selectedEmployees[emp.id] = true;
+              
+              // Get the current relationship for this employee and client
+              const relationship = emp.clientPayTypeRelationships?.find((rel: any) => rel.clientId === tabId);
+              
+              if (relationship) {
                 const relId = relationship.id;
-                // Copy basic values to relationship-specific fields
-                if (relationship.payType === 'hourly') {
-                  empInput[`${relId}_hours`] = empInput.hours;
-                  empInput[`${relId}_otHours`] = empInput.otHours;
-                  empInput[`${relId}_holidayHours`] = empInput.holidayHours;
-                } else if (relationship.payType === 'perdiem') {
-                  empInput[`${relId}_perdiemAmount`] = empInput.perdiemAmount;
-                  empInput[`${relId}_perdiemBreakdown`] = empInput.perdiemBreakdown;
-                  empInput[`${relId}_perdiemMonday`] = empInput.perdiemMonday;
-                  empInput[`${relId}_perdiemTuesday`] = empInput.perdiemTuesday;
-                  empInput[`${relId}_perdiemWednesday`] = empInput.perdiemWednesday;
-                  empInput[`${relId}_perdiemThursday`] = empInput.perdiemThursday;
-                  empInput[`${relId}_perdiemFriday`] = empInput.perdiemFriday;
-                  empInput[`${relId}_perdiemSaturday`] = empInput.perdiemSaturday;
-                  empInput[`${relId}_perdiemSunday`] = empInput.perdiemSunday;
+                
+                // Create input data for this tab
+                const tabInput: any = {
+                  paymentMethods: [relDetail.payType],
+                  selectedRelationshipIds: [relId],
+                  checkDate: latestCheck.date ? createLocalDate(latestCheck.date) : null,
+                  memo: latestCheck.memo || ""
+                };
+                
+                // Populate relationship-specific fields
+                if (relDetail.payType === 'hourly') {
+                  tabInput[`${relId}_hours`] = relDetail.hours?.toString() || "";
+                  tabInput[`${relId}_otHours`] = relDetail.otHours?.toString() || "";
+                  tabInput[`${relId}_holidayHours`] = relDetail.holidayHours?.toString() || "";
+                } else if (relDetail.payType === 'perdiem') {
+                  tabInput[`${relId}_perdiemAmount`] = relDetail.perdiemAmount?.toString() || "";
+                  tabInput[`${relId}_perdiemBreakdown`] = relDetail.perdiemBreakdown || false;
+                  tabInput[`${relId}_perdiemMonday`] = relDetail.perdiemMonday?.toString() || "";
+                  tabInput[`${relId}_perdiemTuesday`] = relDetail.perdiemTuesday?.toString() || "";
+                  tabInput[`${relId}_perdiemWednesday`] = relDetail.perdiemWednesday?.toString() || "";
+                  tabInput[`${relId}_perdiemThursday`] = relDetail.perdiemThursday?.toString() || "";
+                  tabInput[`${relId}_perdiemFriday`] = relDetail.perdiemFriday?.toString() || "";
+                  tabInput[`${relId}_perdiemSaturday`] = relDetail.perdiemSaturday?.toString() || "";
+                  tabInput[`${relId}_perdiemSunday`] = relDetail.perdiemSunday?.toString() || "";
                 }
+                
+                // Add other pay if exists
+                if (relDetail.otherPay && relDetail.otherPay.length > 0) {
+                  tabInput[`${relId}_otherPay`] = relDetail.otherPay;
+                }
+                
+                newTabData[tabId].inputs[emp.id] = tabInput;
               }
             });
+          } else {
+            // Legacy check without relationship details - use simple distribution
+            console.log(`🔍 Legacy check for ${emp.name} - distributing to current tab only`);
+            
+            if (!newTabData[selectedClientId]) {
+              newTabData[selectedClientId] = {
+                selectedEmployees: {},
+                inputs: {}
+              };
+            }
+            
+            newTabData[selectedClientId].selectedEmployees[emp.id] = true;
+            
+            const defaultPaymentMethods = getDefaultPaymentMethods(emp);
+            const defaultRelationshipIds = getDefaultRelationshipIds(emp);
+            
+            const empInput: any = {
+              paymentMethods: defaultPaymentMethods,
+              selectedRelationshipIds: defaultRelationshipIds,
+              hours: latestCheck.hours?.toString() || "",
+              otHours: latestCheck.otHours?.toString() || "",
+              holidayHours: latestCheck.holidayHours?.toString() || "",
+              memo: latestCheck.memo || "",
+              perdiemAmount: latestCheck.perdiemAmount?.toString() || "",
+              perdiemBreakdown: latestCheck.perdiemBreakdown || false,
+              perdiemMonday: latestCheck.perdiemMonday?.toString() || "",
+              perdiemTuesday: latestCheck.perdiemTuesday?.toString() || "",
+              perdiemWednesday: latestCheck.perdiemWednesday?.toString() || "",
+              perdiemThursday: latestCheck.perdiemThursday?.toString() || "",
+              perdiemFriday: latestCheck.perdiemFriday?.toString() || "",
+              perdiemSaturday: latestCheck.perdiemSaturday?.toString() || "",
+              perdiemSunday: latestCheck.perdiemSunday?.toString() || "",
+              checkDate: latestCheck.date ? createLocalDate(latestCheck.date) : null
+            };
+            
+            // If employee has relationships, populate relationship-specific fields
+            if (emp.clientPayTypeRelationships) {
+              emp.clientPayTypeRelationships.forEach(relationship => {
+                if (selectedClientId === 'multiple' || relationship.clientId === selectedClientId) {
+                  const relId = relationship.id;
+                  if (relationship.payType === 'hourly') {
+                    empInput[`${relId}_hours`] = empInput.hours;
+                    empInput[`${relId}_otHours`] = empInput.otHours;
+                    empInput[`${relId}_holidayHours`] = empInput.holidayHours;
+                  } else if (relationship.payType === 'perdiem') {
+                    empInput[`${relId}_perdiemAmount`] = empInput.perdiemAmount;
+                    empInput[`${relId}_perdiemBreakdown`] = empInput.perdiemBreakdown;
+                    empInput[`${relId}_perdiemMonday`] = empInput.perdiemMonday;
+                    empInput[`${relId}_perdiemTuesday`] = empInput.perdiemTuesday;
+                    empInput[`${relId}_perdiemWednesday`] = empInput.perdiemWednesday;
+                    empInput[`${relId}_perdiemThursday`] = empInput.perdiemThursday;
+                    empInput[`${relId}_perdiemFriday`] = empInput.perdiemFriday;
+                    empInput[`${relId}_perdiemSaturday`] = empInput.perdiemSaturday;
+                    empInput[`${relId}_perdiemSunday`] = empInput.perdiemSunday;
+                  }
+                }
+              });
+            }
+            
+            newTabData[selectedClientId].inputs[emp.id] = empInput;
           }
-          
-          newInputs[emp.id] = empInput;
         } else {
           console.log(`🔍 No previous check found for ${emp.name}`);
         }
       });
       
       if (foundPreviousData) {
-        setSelectedEmployees(newSelectedEmployees);
-        setInputs(newInputs);
+        // Update tab data with relationship-specific data distributed across tabs
+        setTabData(newTabData);
         setShowSuccessMessage(true);
-setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 seconds
+        setTimeout(() => setShowSuccessMessage(false), 3000);
+        
+        const employeeCount = new Set(
+          Object.values(newTabData).flatMap(tab => Object.keys(tab.selectedEmployees).filter(id => tab.selectedEmployees[id]))
+        ).size;
+        
+        console.log(`✅ Loaded previous batch data for ${employeeCount} employees across ${Object.keys(newTabData).length} tabs`);
       } else {
         alert("❌ No previous batch data found for this client. Please create checks manually.");
       }
@@ -727,6 +864,8 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
         perdiemFriday: "",
         perdiemSaturday: "",
         perdiemSunday: "",
+        // Auto-apply the default check date when selecting an employee
+        checkDate: defaultCheckDate ? createLocalDate(defaultCheckDate) : (existingData.checkDate || null),
       };
 
       // If single client is selected, initialize relationship-specific fields
@@ -1000,8 +1139,39 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
       return;
     }
 
-    const selectedEmployeeIds = Object.keys(selectedEmployees).filter(
-      (id) => selectedEmployees[id]
+    // NEW: Aggregate selected employees from ALL tabs
+    const aggregatedEmployeeData: { [empId: string]: { 
+      selected: boolean; 
+      inputsFromTabs: Array<{ clientId: string; data: PayInput }> 
+    }} = {};
+    
+    // Loop through all tabs in tabData
+    Object.keys(tabData).forEach(tabClientId => {
+      const tabInfo = tabData[tabClientId];
+      if (!tabInfo) return;
+      
+      // For each selected employee in this tab
+      Object.keys(tabInfo.selectedEmployees).forEach(empId => {
+        if (tabInfo.selectedEmployees[empId] && tabInfo.inputs[empId]) {
+          // Initialize employee data if not exists
+          if (!aggregatedEmployeeData[empId]) {
+            aggregatedEmployeeData[empId] = {
+              selected: true,
+              inputsFromTabs: []
+            };
+          }
+          
+          // Add this tab's data to the employee's aggregated data
+          aggregatedEmployeeData[empId].inputsFromTabs.push({
+            clientId: tabClientId,
+            data: tabInfo.inputs[empId]
+          });
+        }
+      });
+    });
+    
+    const selectedEmployeeIds = Object.keys(aggregatedEmployeeData).filter(
+      (id) => aggregatedEmployeeData[id].selected
     );
     
     if (selectedEmployeeIds.length === 0) {
@@ -1009,282 +1179,134 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
       return;
     }
 
-    // Validate all selected employees
+    // Sort selected employee IDs alphabetically by first name to maintain consistent check number order
+    selectedEmployeeIds.sort((idA, idB) => {
+      const empA = employees.find(e => e.id === idA);
+      const empB = employees.find(e => e.id === idB);
+      if (!empA || !empB) return 0;
+      const firstNameA = empA.name.split(' ')[0].toLowerCase();
+      const firstNameB = empB.name.split(' ')[0].toLowerCase();
+      return firstNameA.localeCompare(firstNameB);
+    });
+
+    // Validate all selected employees - check each tab where they're selected
     for (const empId of selectedEmployeeIds) {
       const emp = employees.find((e) => e.id === empId);
       if (!emp) continue;
 
-      const data = inputs[empId];
-      if (!data) {
+      // Get data from ALL tabs this employee is selected in
+      const empData = aggregatedEmployeeData[empId];
+      if (!empData || empData.inputsFromTabs.length === 0) {
         alert(`Please fill in data for ${emp.name}`);
         return;
       }
 
-      // Validation based on ACTUAL DATA entered, not the currently selected tab
-      // Determine what type of payment this employee actually has
+      // Check if employee has payment data in AT LEAST ONE of their selected tabs
+      let hasDataInAnyTab = false;
       
-      // Check for relationship-based data (Multiple Clients tab)
-      let hasHourlyData = false;
-      let hasPerDiemData = false;
-      
-      if (selectedClientId === 'multiple' && data.selectedRelationshipIds && data.selectedRelationshipIds.length > 0) {
-        // For multiple clients, check relationship-specific fields
-        const relationships = emp.clientPayTypeRelationships?.filter(rel => 
-          data.selectedRelationshipIds!.includes(rel.id)
-        ) || [];
+      for (const tabInfo of empData.inputsFromTabs) {
+        const data = tabInfo.data;
+        const tabClientId = tabInfo.clientId;
         
-        for (const rel of relationships) {
-          if (rel.payType === 'hourly') {
-            const relHours = parseFloat(data[`${rel.id}_hours`] || '0');
-            const relOtHours = parseFloat(data[`${rel.id}_otHours`] || '0');
-            const relHolidayHours = parseFloat(data[`${rel.id}_holidayHours`] || '0');
-            if (relHours > 0 || relOtHours > 0 || relHolidayHours > 0) {
-              hasHourlyData = true;
-            }
-          } else if (rel.payType === 'perdiem') {
-            const relAmount = parseFloat(data[`${rel.id}_perdiemAmount`] || '0');
-            const relBreakdown = data[`${rel.id}_perdiemBreakdown`];
-            
-            if (relBreakdown) {
-              // Check daily breakdown
-              const hasDailyData = ['perdiemMonday', 'perdiemTuesday', 'perdiemWednesday', 
-                                   'perdiemThursday', 'perdiemFriday', 'perdiemSaturday', 'perdiemSunday']
-                .some(day => parseFloat(data[`${rel.id}_${day}`] || '0') > 0);
-              if (hasDailyData) {
-                hasPerDiemData = true;
-              }
-            } else if (relAmount > 0) {
-              hasPerDiemData = true;
-            }
-          }
-        }
-      } else {
-        // For single client, check basic fields
-        hasHourlyData = parseFloat(data.hours || '0') > 0 || 
-                       parseFloat(data.otHours || '0') > 0 || 
-                       parseFloat(data.holidayHours || '0') > 0;
+        // Validation based on ACTUAL DATA entered for this specific tab
+        let hasHourlyData = false;
+        let hasPerDiemData = false;
         
-        // For single client, also check if there are relationship-specific fields
-        if (emp.clientPayTypeRelationships) {
-          const clientRelationship = emp.clientPayTypeRelationships.find(rel => 
-            rel.clientId === selectedClientId
-          );
+        // Check relationship-specific fields for this tab's client
+        if (data.selectedRelationshipIds && data.selectedRelationshipIds.length > 0) {
+          // Check relationship-specific fields for this client
+          const relationships = emp.clientPayTypeRelationships?.filter(rel => 
+            data.selectedRelationshipIds!.includes(rel.id) && rel.clientId === tabClientId
+          ) || [];
           
-          if (clientRelationship) {
-            if (clientRelationship.payType === 'hourly') {
-              // Check for relationship-specific hourly data
-              const relHours = parseFloat(data[`${clientRelationship.id}_hours`] || '0');
-              const relOtHours = parseFloat(data[`${clientRelationship.id}_otHours`] || '0');
-              const relHolidayHours = parseFloat(data[`${clientRelationship.id}_holidayHours`] || '0');
-              hasHourlyData = relHours > 0 || relOtHours > 0 || relHolidayHours > 0;
-            } else if (clientRelationship.payType === 'perdiem') {
-              // Check for relationship-specific per diem data
-              const relAmount = parseFloat(data[`${clientRelationship.id}_perdiemAmount`] || '0');
-              const relBreakdown = data[`${clientRelationship.id}_perdiemBreakdown`];
+          for (const rel of relationships) {
+            if (rel.payType === 'hourly') {
+              const relHours = parseFloat(data[`${rel.id}_hours`] || '0');
+              const relOtHours = parseFloat(data[`${rel.id}_otHours`] || '0');
+              const relHolidayHours = parseFloat(data[`${rel.id}_holidayHours`] || '0');
+              if (relHours > 0 || relOtHours > 0 || relHolidayHours > 0) {
+                hasHourlyData = true;
+              }
+            } else if (rel.payType === 'perdiem') {
+              const relAmount = parseFloat(data[`${rel.id}_perdiemAmount`] || '0');
+              const relBreakdown = data[`${rel.id}_perdiemBreakdown`];
               
               if (relBreakdown) {
                 // Check daily breakdown
                 const hasDailyData = ['perdiemMonday', 'perdiemTuesday', 'perdiemWednesday', 
                                      'perdiemThursday', 'perdiemFriday', 'perdiemSaturday', 'perdiemSunday']
-                  .some(day => parseFloat(data[`${clientRelationship.id}_${day}`] || '0') > 0);
-                hasPerDiemData = hasDailyData;
-              } else {
-                hasPerDiemData = relAmount > 0;
+                  .some(day => parseFloat(data[`${rel.id}_${day}`] || '0') > 0);
+                if (hasDailyData) {
+                  hasPerDiemData = true;
+                }
+              } else if (relAmount > 0) {
+                hasPerDiemData = true;
               }
             }
           }
-        }
-        
-        // Fallback to basic fields if no relationship data found
-               // Fallback to basic fields if no relationship data found
-               if (!hasHourlyData && !hasPerDiemData) {
-                // Check basic per diem fields
-                hasPerDiemData = parseFloat(calculatePerDiemTotal(data)) > 0;
-                
-                // Also check basic hourly fields
-                hasHourlyData = parseFloat(data.hours || '0') > 0 || 
-                               parseFloat(data.otHours || '0') > 0 || 
-                               parseFloat(data.holidayHours || '0') > 0;
-              }
-      }
-      
-      if (hasHourlyData && hasPerDiemData) {
-        // Mixed payment - validate both
-        // For multiple clients, we don't need to validate basic fields since data is in relationships
-        if (selectedClientId === 'multiple') {
-          // Data is already validated in the relationship loop above
-          // No additional validation needed here
         } else {
-          // Single client validation
+          // Check basic fields
+          hasHourlyData = parseFloat(data.hours || '0') > 0 || 
+                         parseFloat(data.otHours || '0') > 0 || 
+                         parseFloat(data.holidayHours || '0') > 0;
+          
+          // Also check if there are relationship-specific fields
           if (emp.clientPayTypeRelationships) {
             const clientRelationship = emp.clientPayTypeRelationships.find(rel => 
-              rel.clientId === selectedClientId
+              rel.clientId === tabClientId
             );
             
             if (clientRelationship) {
               if (clientRelationship.payType === 'hourly') {
-                // Check relationship-specific hourly data
+                // Check for relationship-specific hourly data
                 const relHours = parseFloat(data[`${clientRelationship.id}_hours`] || '0');
-                if (relHours <= 0) {
-                  alert(`Please enter valid hours for ${emp.name} (hourly portion)`);
-                  return;
-                }
+                const relOtHours = parseFloat(data[`${clientRelationship.id}_otHours`] || '0');
+                const relHolidayHours = parseFloat(data[`${clientRelationship.id}_holidayHours`] || '0');
+                hasHourlyData = relHours > 0 || relOtHours > 0 || relHolidayHours > 0;
               } else if (clientRelationship.payType === 'perdiem') {
-                // Check relationship-specific per diem data
+                // Check for relationship-specific per diem data
+                const relAmount = parseFloat(data[`${clientRelationship.id}_perdiemAmount`] || '0');
                 const relBreakdown = data[`${clientRelationship.id}_perdiemBreakdown`];
+                
                 if (relBreakdown) {
+                  // Check daily breakdown
                   const hasDailyData = ['perdiemMonday', 'perdiemTuesday', 'perdiemWednesday', 
                                        'perdiemThursday', 'perdiemFriday', 'perdiemSaturday', 'perdiemSunday']
                     .some(day => parseFloat(data[`${clientRelationship.id}_${day}`] || '0') > 0);
-                  if (!hasDailyData) {
-                    alert(`Please enter per diem amounts for at least one day for ${emp.name} (per diem portion)`);
-                    return;
-                  }
+                  hasPerDiemData = hasDailyData;
                 } else {
-                  const relAmount = parseFloat(data[`${clientRelationship.id}_perdiemAmount`] || '0');
-                  if (relAmount <= 0) {
-                    alert(`Please enter a valid per diem amount for ${emp.name} (per diem portion)`);
-                    return;
-                  }
+                  hasPerDiemData = relAmount > 0;
                 }
               }
-            } else {
-              // Fallback to basic fields if no relationship found
-              if (!data.hours || parseFloat(data.hours) <= 0) {
-                alert(`Please enter valid hours for ${emp.name} (hourly portion)`);
-                return;
-              }
-              if (data.perdiemBreakdown) {
-                const hasDailyData = ['perdiemMonday', 'perdiemTuesday', 'perdiemWednesday', 
-                                     'perdiemThursday', 'perdiemFriday', 'perdiemSaturday', 'perdiemSunday']
-                  .some(day => data[day as keyof PayInput] && parseFloat(data[day as keyof PayInput] as string) > 0);
-                if (!hasDailyData) {
-                  alert(`Please enter per diem amounts for at least one day for ${emp.name} (per diem portion)`);
-                  return;
-                }
-              } else if (!data.perdiemAmount || parseFloat(data.perdiemAmount) <= 0) {
-                alert(`Please enter a valid per diem amount for ${emp.name} (per diem portion)`);
-                return;
-              }
-            }
-          } else {
-            // No relationships - use basic fields
-            if (!data.hours || parseFloat(data.hours) <= 0) {
-              alert(`Please enter valid hours for ${emp.name} (hourly portion)`);
-              return;
-            }
-            if (data.perdiemBreakdown) {
-              const hasDailyData = ['perdiemMonday', 'perdiemTuesday', 'perdiemWednesday', 
-                                   'perdiemThursday', 'perdiemFriday', 'perdiemSaturday', 'perdiemSunday']
-                .some(day => data[day as keyof PayInput] && parseFloat(data[day as keyof PayInput] as string) > 0);
-              if (!hasDailyData) {
-                alert(`Please enter per diem amounts for at least one day for ${emp.name} (per diem portion)`);
-                return;
-              }
-            } else if (!data.perdiemAmount || parseFloat(data.perdiemAmount) <= 0) {
-              alert(`Please enter a valid per diem amount for ${emp.name} (per diem portion)`);
-              return;
             }
           }
-        }
-      } else if (hasHourlyData) {
-        // Only hourly data - validate hours
-        if (selectedClientId === 'multiple') {
-          // Data is already validated in the relationship loop above
-          // No additional validation needed here
-        } else {
-          // Single client validation
-          if (emp.clientPayTypeRelationships) {
-            const clientRelationship = emp.clientPayTypeRelationships.find(rel => 
-              rel.clientId === selectedClientId
-            );
+          
+          // Fallback to basic fields if no relationship data found
+          if (!hasHourlyData && !hasPerDiemData) {
+            // Check basic per diem fields
+            hasPerDiemData = parseFloat(calculatePerDiemTotal(data)) > 0;
             
-            if (clientRelationship && clientRelationship.payType === 'hourly') {
-              // Check relationship-specific hourly data
-              const relHours = parseFloat(data[`${clientRelationship.id}_hours`] || '0');
-              if (relHours <= 0) {
-                alert(`Please enter valid hours for ${emp.name}`);
-                return;
-              }
-            } else {
-              // Fallback to basic fields
-              if (!data.hours || parseFloat(data.hours) <= 0) {
-                alert(`Please enter valid hours for ${emp.name}`);
-                return;
-              }
-            }
-          } else {
-            // No relationships - use basic fields
-            if (!data.hours || parseFloat(data.hours) <= 0) {
-              alert(`Please enter valid hours for ${emp.name}`);
-              return;
-            }
+            // Also check basic hourly fields
+            hasHourlyData = parseFloat(data.hours || '0') > 0 || 
+                           parseFloat(data.otHours || '0') > 0 || 
+                           parseFloat(data.holidayHours || '0') > 0;
           }
         }
-      } else if (hasPerDiemData) {
-        // Only per diem data - validate per diem
-        if (selectedClientId === 'multiple') {
-          // Data is already validated in the relationship loop above
-          // No additional validation needed here
-        } else {
-          // Single client validation
-          if (emp.clientPayTypeRelationships) {
-            const clientRelationship = emp.clientPayTypeRelationships.find(rel => 
-              rel.clientId === selectedClientId
-            );
-            
-            if (clientRelationship && clientRelationship.payType === 'perdiem') {
-              // Check relationship-specific per diem data
-              const relBreakdown = data[`${clientRelationship.id}_perdiemBreakdown`];
-              if (relBreakdown) {
-                const hasDailyData = ['perdiemMonday', 'perdiemTuesday', 'perdiemWednesday', 
-                                     'perdiemThursday', 'perdiemFriday', 'perdiemSaturday', 'perdiemSunday']
-                  .some(day => parseFloat(data[`${clientRelationship.id}_${day}`] || '0') > 0);
-                if (!hasDailyData) {
-                  alert(`Please enter per diem amounts for at least one day for ${emp.name}`);
-                  return;
-                }
-              } else {
-                const relAmount = parseFloat(data[`${clientRelationship.id}_perdiemAmount`] || '0');
-                if (relAmount <= 0) {
-                  alert(`Please enter a valid per diem amount for ${emp.name}`);
-                  return;
-                }
-              }
-            } else {
-              // Fallback to basic fields
-              if (data.perdiemBreakdown) {
-                const hasDailyData = ['perdiemMonday', 'perdiemTuesday', 'perdiemWednesday', 
-                                     'perdiemThursday', 'perdiemFriday', 'perdiemSaturday', 'perdiemSunday']
-                  .some(day => data[day as keyof PayInput] && parseFloat(data[day as keyof PayInput] as string) > 0);
-                if (!hasDailyData) {
-                  alert(`Please enter per diem amounts for at least one day for ${emp.name}`);
-                  return;
-                }
-              } else if (!data.perdiemAmount || parseFloat(data.perdiemAmount) <= 0) {
-                alert(`Please enter a valid per diem amount for ${emp.name}`);
-                return;
-              }
-            }
-          } else {
-            // No relationships - use basic fields
-            if (data.perdiemBreakdown) {
-              const hasDailyData = ['perdiemMonday', 'perdiemTuesday', 'perdiemWednesday', 
-                                   'perdiemThursday', 'perdiemFriday', 'perdiemSaturday', 'perdiemSunday']
-                .some(day => data[day as keyof PayInput] && parseFloat(data[day as keyof PayInput] as string) > 0);
-              if (!hasDailyData) {
-                alert(`Please enter per diem amounts for at least one day for ${emp.name}`);
-                return;
-              }
-            } else if (!data.perdiemAmount || parseFloat(data.perdiemAmount) <= 0) {
-              alert(`Please enter a valid per diem amount for ${emp.name}`);
-              return;
-            }
-          }
+        
+        // If this tab has data, mark it
+        if (hasHourlyData || hasPerDiemData) {
+          hasDataInAnyTab = true;
+          break; // No need to check other tabs if we found data in one
         }
-      } else {
-        // No data at all
-        alert(`Please enter either hourly or per diem data for ${emp.name}`);
+      }
+      
+      // Only fail validation if employee has NO data in ANY of their selected tabs
+      if (!hasDataInAnyTab) {
+        const clientNames = empData.inputsFromTabs.map(t => {
+          const client = companyClients.find(c => c.id === t.clientId);
+          return client?.name || 'Unknown';
+        }).join(', ');
+        alert(`Please enter payment data (hours or per diem) for ${emp.name} in at least one of their selected clients: ${clientNames}`);
         return;
       }
     }
@@ -1339,190 +1361,151 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
       console.log("🔍 DEBUG: Using nextCheckNumber from bank:", nextCheckNumber);
       
       // Create checks for each selected employee
-      const createdChecks = [];
+      const createdChecks: any[] = [];
       
       for (const empId of selectedEmployeeIds) {
         const emp = employees.find(e => e.id === empId);
         if (!emp) continue;
         
-        // Calculate the week key for the check date (or current date if not specified)
-        const checkDate = inputs[emp.id]?.checkDate || new Date();
+        // Get aggregated data from all tabs for this employee
+        const empAggregatedData = aggregatedEmployeeData[empId];
+        if (!empAggregatedData || empAggregatedData.inputsFromTabs.length === 0) continue;
+        
+        // Use the first tab's check date as the default (or current date)
+        const checkDate = empAggregatedData.inputsFromTabs[0]?.data.checkDate || new Date();
         // Calculate week key as the Sunday of the week (same logic as View Checks)
         const d = new Date(checkDate);
         const weekKey = new Date(d.setDate(d.getDate() - d.getDay())).toISOString().slice(0, 10);
 
-        const data = inputs[empId];
-        if (!data) continue;
-
-        // Determine client and pay type based on selection
-        let clientId = selectedClientId;
-        let payType = emp.payType;
-        let relationshipDetails: Array<{ id: string; clientId: string; clientName: string; payType: string; payRate?: number }> = [];
+        // NEW: Build relationship details from ALL tabs
+        let relationshipDetails: any[] = [];
         let selectedRelationshipIds: string[] = [];
 
-        if (selectedClientId === 'multiple') {
-          // Multiple clients: use selected relationships
-          clientId = 'multiple';
-          payType = 'mixed';
-          if (data.selectedRelationshipIds && data.selectedRelationshipIds.length > 0) {
-            selectedRelationshipIds = data.selectedRelationshipIds;
-            relationshipDetails = emp.clientPayTypeRelationships
-              ?.filter(rel => data.selectedRelationshipIds?.includes(rel.id))
+        // Process data from each tab this employee was selected in
+        empAggregatedData.inputsFromTabs.forEach(tabInfo => {
+          const tabData = tabInfo.data;
+          const tabClientId = tabInfo.clientId;
+          
+          if (tabData.selectedRelationshipIds && tabData.selectedRelationshipIds.length > 0) {
+            // Get relationships for this tab
+            const tabRelationships = emp.clientPayTypeRelationships
+              ?.filter(rel => tabData.selectedRelationshipIds?.includes(rel.id) && rel.clientId === tabClientId)
               .map(rel => {
+                // Get CURRENT client name (not cached one) for new checks
+                const currentClient = clients.find(c => c.id === rel.clientId);
+                const clientNameForCheck = currentClient?.name || rel.clientName;
+                
                 const relData: any = {
                   id: rel.id,
                   clientId: rel.clientId,
-                  clientName: rel.clientName,
+                  clientName: clientNameForCheck, // Use current client name for new checks
                   payType: rel.payType,
                   payRate: rel.payRate ? parseFloat(rel.payRate) : (emp.payRate || 0)
                 };
                 
                 // Add relationship-specific hours if available
-                const relHours = parseFloat((data as any)[`${rel.id}_hours`] || '0');
-                if (relHours > 0) {
-                  relData.hours = relHours;
-                }
+                const relHours = parseFloat((tabData as any)[`${rel.id}_hours`] || '0');
+                if (relHours > 0) relData.hours = relHours;
                 
-                const relOtHours = parseFloat((data as any)[`${rel.id}_otHours`] || '0');
-                if (relOtHours > 0) {
-                  relData.otHours = relOtHours;
-                }
+                const relOtHours = parseFloat((tabData as any)[`${rel.id}_otHours`] || '0');
+                if (relOtHours > 0) relData.otHours = relOtHours;
                 
-                const relHolidayHours = parseFloat((data as any)[`${rel.id}_holidayHours`] || '0');
-                if (relHolidayHours > 0) {
-                  relData.holidayHours = relHolidayHours;
-                }
+                const relHolidayHours = parseFloat((tabData as any)[`${rel.id}_holidayHours`] || '0');
+                if (relHolidayHours > 0) relData.holidayHours = relHolidayHours;
                 
                 // Add relationship-specific per diem data if available
-                const relPerdiemAmount = parseFloat((data as any)[`${rel.id}_perdiemAmount`] || '0');
-                if (relPerdiemAmount > 0) {
-                  relData.perdiemAmount = relPerdiemAmount;
-                }
+                const relPerdiemAmount = parseFloat((tabData as any)[`${rel.id}_perdiemAmount`] || '0');
+                if (relPerdiemAmount > 0) relData.perdiemAmount = relPerdiemAmount;
                 
-                const relPerdiemBreakdown = (data as any)[`${rel.id}_perdiemBreakdown`];
-                if (relPerdiemBreakdown !== undefined) {
-                  relData.perdiemBreakdown = relPerdiemBreakdown;
-                }
+                const relPerdiemBreakdown = (tabData as any)[`${rel.id}_perdiemBreakdown`];
+                if (relPerdiemBreakdown !== undefined) relData.perdiemBreakdown = relPerdiemBreakdown;
                 
                 // Add daily per diem amounts if available
                 ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].forEach(day => {
-                  const dayAmount = parseFloat((data as any)[`${rel.id}_perdiem${day}`] || '0');
-                  if (dayAmount > 0) {
-                    relData[`perdiem${day}`] = dayAmount;
-                  }
+                  const dayAmount = parseFloat((tabData as any)[`${rel.id}_perdiem${day}`] || '0');
+                  if (dayAmount > 0) relData[`perdiem${day}`] = dayAmount;
                 });
                 
-                // Add relationship-specific other pay if available (for both hourly and per diem)
-                const relOtherPay = (data as any)[`${rel.id}_otherPay`];
-                if (relOtherPay && relOtherPay.length > 0) {
-                  relData.otherPay = relOtherPay;
-                }
+                // Add relationship-specific other pay if available
+                const relOtherPay = (tabData as any)[`${rel.id}_otherPay`];
+                if (relOtherPay && relOtherPay.length > 0) relData.otherPay = relOtherPay;
                 
-                console.log(`🔍 DEBUG: Multiple client relationship data for ${rel.clientName}:`, relData);
-                console.log(`🔍 DEBUG: Multiple client relationship JSON for ${rel.clientName}:`, JSON.stringify(relData, null, 2));
                 return relData;
               }) || [];
+            
+            relationshipDetails.push(...tabRelationships);
+            selectedRelationshipIds.push(...(tabData.selectedRelationshipIds || []));
           }
-        } else if (selectedClientId && selectedClientId !== 'multiple') {
-          // Single client: determine pay type from client name
-          const client = companyClients.find(c => c.id === selectedClientId);
-          if (client) {
-            if (client.name.toLowerCase().includes('per diem')) {
-              payType = 'perdiem';
-            } else if (client.name.toLowerCase().includes('hourly')) {
-              payType = 'hourly';
-            }
-          }
-          
-          // Create default relationship for single client
-          const singleRelData: any = {
-            id: 'default',
-            clientId: selectedClientId,
-            clientName: client && client.division 
-              ? `${client.name} (${client.division})`
-              : client?.name || 'Unknown Client',
-            payType: payType,
-            payRate: emp.payRate || 0
-          };
-          
-          // Add relationship-specific data for single client
-          console.log('🔍 DEBUG: Single client data being processed:', {
-            selectedClientId,
-            clientName: client?.name,
-            payType,
-            dataHours: data.hours,
-            dataOtHours: data.otHours,
-            dataHolidayHours: data.holidayHours,
-            dataPerdiemAmount: data.perdiemAmount,
-            dataPerdiemBreakdown: data.perdiemBreakdown,
-            dataOtherPay: data.otherPay,
-            fullData: data
-          });
-          
-          const relHours = parseFloat(data.hours || '0');
-          console.log('🔍 DEBUG: Single client relHours:', relHours);
-          if (relHours > 0) {
-            singleRelData.hours = relHours;
-          }
-          
-          const relOtHours = parseFloat(data.otHours || '0');
-          console.log('🔍 DEBUG: Single client relOtHours:', relOtHours);
-          if (relOtHours > 0) {
-            singleRelData.otHours = relOtHours;
-          }
-          
-          const relHolidayHours = parseFloat(data.holidayHours || '0');
-          console.log('🔍 DEBUG: Single client relHolidayHours:', relHolidayHours);
-          if (relHolidayHours > 0) {
-            singleRelData.holidayHours = relHolidayHours;
-          }
-          
-          const relPerdiemAmount = parseFloat(data.perdiemAmount || '0');
-          console.log('🔍 DEBUG: Single client relPerdiemAmount:', relPerdiemAmount);
-          if (relPerdiemAmount > 0) {
-            singleRelData.perdiemAmount = relPerdiemAmount;
-          }
-          
-          if (data.perdiemBreakdown !== undefined) {
-            singleRelData.perdiemBreakdown = data.perdiemBreakdown;
-          }
-          
-          // Add daily per diem amounts if available
-          ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].forEach(day => {
-            const dayAmount = parseFloat((data as any)[`perdiem${day}`] || '0');
-            if (dayAmount > 0) {
-              singleRelData[`perdiem${day}`] = dayAmount;
-            }
-          });
-          
-          // Add other pay if available (for both hourly and per diem)
-          // Check for relationship-specific other pay first
-          if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-            const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-            if (relationship) {
-              const relOtherPay = (data as any)[`${relationship.id}_otherPay`];
-              if (relOtherPay && relOtherPay.length > 0) {
-                singleRelData.otherPay = relOtherPay;
-              } else if (data.otherPay && data.otherPay.length > 0) {
-                singleRelData.otherPay = data.otherPay;
-              }
-            } else if (data.otherPay && data.otherPay.length > 0) {
-              singleRelData.otherPay = data.otherPay;
-            }
-          } else if (data.otherPay && data.otherPay.length > 0) {
-            singleRelData.otherPay = data.otherPay;
-          }
-          
-          relationshipDetails = [singleRelData];
-          
-          console.log('🔍 DEBUG: Final single client relationshipDetails:', singleRelData);
-          console.log('🔍 DEBUG: Single client relationshipDetails JSON:', JSON.stringify(singleRelData, null, 2));
-        }
+        });
+        
+        // Determine overall client and pay type
+        let clientId = relationshipDetails.length > 1 ? 'multiple' : (relationshipDetails[0]?.clientId || null);
+        let payType = relationshipDetails.length > 1 ? 'mixed' : (relationshipDetails[0]?.payType || emp.payType);
+        
+        console.log(`🔍 DEBUG: Aggregated relationship details for ${emp.name}:`, relationshipDetails);
+        console.log(`🔍 DEBUG: clientId=${clientId}, payType=${payType}, relationshipCount=${relationshipDetails.length}`);
 
-        // Calculate amounts
-        const hourlyTotal = calculateHourlyTotal(emp, data);
-        const perDiemTotal = calculatePerDiemTotal(data);
-        const totalAmount = calculateAmount(emp, data);
+        // Calculate aggregated totals from all relationships
+        let totalHours = 0;
+        let totalOtHours = 0;
+        let totalHolidayHours = 0;
+        let totalPerDiemAmount = 0;
+        let aggregatedOtherPay: OtherPayItem[] = [];
+        let aggregatedPerDiemData = {
+          perdiemMonday: 0,
+          perdiemTuesday: 0,
+          perdiemWednesday: 0,
+          perdiemThursday: 0,
+          perdiemFriday: 0,
+          perdiemSaturday: 0,
+          perdiemSunday: 0
+        };
+        
+        // Calculate hourly amount per relationship (using relationship-specific pay rates)
+        let hourlyAmount = 0;
+        
+        // Aggregate data from all relationships
+        for (const rel of relationshipDetails) {
+          if (rel.payType === 'hourly') {
+            // Use relationship-specific pay rate for this relationship's hours
+            const relPayRate = rel.payRate || emp.payRate || 0;
+            const relHours = rel.hours || 0;
+            const relOtHours = rel.otHours || 0;
+            const relHolidayHours = rel.holidayHours || 0;
+            
+            // Calculate hourly amount for this relationship using its specific pay rate
+            hourlyAmount += (relHours * relPayRate) + (relOtHours * relPayRate * 1.5) + (relHolidayHours * relPayRate * 2);
+            
+            // Still track totals for display purposes
+            totalHours += relHours;
+            totalOtHours += relOtHours;
+            totalHolidayHours += relHolidayHours;
+            
+            if (rel.otherPay && rel.otherPay.length > 0) {
+              aggregatedOtherPay.push(...rel.otherPay);
+            }
+          } else if (rel.payType === 'perdiem') {
+            totalPerDiemAmount += rel.perdiemAmount || 0;
+            aggregatedPerDiemData.perdiemMonday += rel.perdiemMonday || 0;
+            aggregatedPerDiemData.perdiemTuesday += rel.perdiemTuesday || 0;
+            aggregatedPerDiemData.perdiemWednesday += rel.perdiemWednesday || 0;
+            aggregatedPerDiemData.perdiemThursday += rel.perdiemThursday || 0;
+            aggregatedPerDiemData.perdiemFriday += rel.perdiemFriday || 0;
+            aggregatedPerDiemData.perdiemSaturday += rel.perdiemSaturday || 0;
+            aggregatedPerDiemData.perdiemSunday += rel.perdiemSunday || 0;
+            if (rel.otherPay && rel.otherPay.length > 0) {
+              aggregatedOtherPay.push(...rel.otherPay);
+            }
+          }
+        }
+        
+        // Calculate total amount
+        // Add daily per diem breakdown to totalPerDiemAmount if it exists
+        const dailyPerDiemTotal = Object.values(aggregatedPerDiemData).reduce((sum, val) => sum + val, 0);
+        const finalPerDiemAmount = totalPerDiemAmount + dailyPerDiemTotal;
+        
+        const otherPayTotal = aggregatedOtherPay.reduce((sum, item) => sum + parseFloat(item.amount || '0'), 0);
+        const totalAmount = hourlyAmount + finalPerDiemAmount + otherPayTotal;
 
         // Prepare check data
         const checkData: any = {
@@ -1530,296 +1513,34 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
           employeeName: emp.name,
           employeeId: emp.id,
           amount: totalAmount,
-          hours: (() => {
-            // Check for relationship-specific hourly data first (when employee has relationships)
-            if (selectedClientId !== 'multiple') {
-              const relationship = emp.clientPayTypeRelationships?.find(rel => rel.clientId === selectedClientId);
-              if (relationship && relationship.payType === 'hourly') {
-                const relId = relationship.id;
-                const relHours = data[`${relId}_hours`];
-                if (relHours && relHours !== '') {
-                  return parseFloat(relHours);
-                }
-              }
-            }
-            // Fallback to basic hours field
-            return data.hours && data.hours !== '' ? parseFloat(data.hours) : 0;
-          })(),
-          otHours: (() => {
-            // Check for relationship-specific OT hours data first
-            if (selectedClientId !== 'multiple') {
-              const relationship = emp.clientPayTypeRelationships?.find(rel => rel.clientId === selectedClientId);
-              if (relationship && relationship.payType === 'hourly') {
-                const relId = relationship.id;
-                const relOtHours = data[`${relId}_otHours`];
-                if (relOtHours && relOtHours !== '') {
-                  return parseFloat(relOtHours);
-                }
-              }
-            }
-            // Fallback to basic otHours field
-            return data.otHours && data.otHours !== '' ? parseFloat(data.otHours) : 0;
-          })(),
-          holidayHours: (() => {
-            // Check for relationship-specific holiday hours data first
-            if (selectedClientId !== 'multiple') {
-              const relationship = emp.clientPayTypeRelationships?.find(rel => rel.clientId === selectedClientId);
-              if (relationship && relationship.payType === 'hourly') {
-                const relId = relationship.id;
-                const relHolidayHours = data[`${relId}_holidayHours`];
-                if (relHolidayHours && relHolidayHours !== '') {
-                  return parseFloat(relHolidayHours);
-                }
-              }
-            }
-            // Fallback to basic holidayHours field
-            return data.holidayHours && data.holidayHours !== '' ? parseFloat(data.holidayHours) : 0;
-          })(),
-          otherPay: (() => {
-            // Check for relationship-specific other pay data first
-            if (selectedClientId !== 'multiple') {
-              const relationship = emp.clientPayTypeRelationships?.find(rel => rel.clientId === selectedClientId);
-              if (relationship && relationship.payType === 'hourly') {
-                const relId = relationship.id;
-                const relOtherPay = data[`${relId}_otherPay`];
-                if (relOtherPay && relOtherPay.length > 0) {
-                  return relOtherPay;
-                }
-              }
-            }
-            // Fallback to basic otherPay field
-            return data.otherPay || [];
-          })(),
-          memo: data.memo || '',
-          paymentMethods: data.paymentMethods || [payType],
-          selectedRelationshipIds: selectedRelationshipIds.length > 0 ? selectedRelationshipIds : [],
+          hours: totalHours,
+          otHours: totalOtHours,
+          holidayHours: totalHolidayHours,
+          perdiemAmount: finalPerDiemAmount || 0,
+          otherPay: aggregatedOtherPay.map((item: OtherPayItem) => ({
+            ...item,
+            description: item.description && item.description.trim() !== '' ? item.description : 'Other Pay'
+          })),
+          memo: empAggregatedData.inputsFromTabs[0]?.data.memo || '',
+          paymentMethods: relationshipDetails.map(r => r.payType),
+          selectedRelationshipIds: selectedRelationshipIds,
           relationshipDetails: relationshipDetails,
           clientId: clientId,
           payType: payType,
           payRate: emp.payRate?.toString() || '',
           weekKey: weekKey,
           workWeek: getISOWeek(checkDate).toString(),
-          date: (() => {
-            const checkDate = inputs[emp.id]?.checkDate;
-            if (!checkDate) return new Date().toISOString().split('T')[0];
-            return `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
-          })(), // Fixed date formatting
+          date: checkDate.toISOString().split('T')[0],
           createdBy: auth.currentUser?.uid,
           reviewed: false,
           paid: false,
           checkNumber: nextCheckNumber + createdChecks.length,
         };
 
-        // For relationship-based checks, populate basic fields from relationship data
-        if (selectedClientId === 'multiple' && relationshipDetails.length > 0) {
-          // Calculate total hours from all hourly relationships
-          let totalHours = 0;
-          let totalPerDiemAmount = 0;
-          let aggregatedOtherPay: OtherPayItem[] = [];
-          
-          // For per diem relationships, we need to aggregate the daily breakdown
-          let aggregatedPerDiemData = {
-            perdiemMonday: 0,
-            perdiemTuesday: 0,
-            perdiemWednesday: 0,
-            perdiemThursday: 0,
-            perdiemFriday: 0,
-            perdiemSaturday: 0,
-            perdiemSunday: 0
-          };
-          
-          // Store individual relationship hours for proper display in modal
-          let relationshipHours: { [key: string]: number } = {};
-          
-                  // Debug: Log the data structure for per diem relationships
-        console.log("🔍 DEBUG: Data structure for per diem aggregation:", {
-          dataKeys: Object.keys(data),
-          perdiemFields: Object.keys(data).filter(key => key.includes('perdiem')),
-          relationshipDetails: relationshipDetails,
-          fullData: data
-        });
-          
-          for (const rel of relationshipDetails) {
-            if (rel.payType === 'hourly') {
-              // Get hours for this specific relationship
-              const relHours = parseFloat((data as any)[`${rel.id}_hours`] || '0');
-              totalHours += relHours;
-              
-              // Store the hours for this specific relationship
-              relationshipHours[rel.id] = relHours;
-              
-              // Aggregate Other Pay items from this relationship
-              const relOtherPay = (data as any)[`${rel.id}_otherPay`] || [];
-              if (relOtherPay.length > 0) {
-                aggregatedOtherPay.push(...relOtherPay);
-              }
-            } else if (rel.payType === 'perdiem') {
-              // Debug: Log what we're looking for and what we find
-              console.log("🔍 DEBUG: Processing per diem relationship:", {
-                relationshipId: rel.id,
-                relationshipName: rel.clientName,
-                dataKeys: Object.keys(data),
-                perdiemAmountField: `${rel.id}_perdiemAmount`,
-                perdiemAmountValue: (data as any)[`${rel.id}_perdiemAmount`],
-                perdiemMondayField: `${rel.id}_perdiemMonday`,
-                perdiemMondayValue: (data as any)[`${rel.id}_perdiemMonday`],
-                allPerdiemFields: Object.keys(data).filter(key => key.includes(rel.id) && key.includes('perdiem')),
-                actualPerdiemValues: {
-                  monday: (data as any)[`${rel.id}_perdiemMonday`],
-                  tuesday: (data as any)[`${rel.id}_perdiemTuesday`],
-                  wednesday: (data as any)[`${rel.id}_perdiemWednesday`],
-                  thursday: (data as any)[`${rel.id}_perdiemThursday`],
-                  friday: (data as any)[`${rel.id}_perdiemFriday`],
-                  saturday: (data as any)[`${rel.id}_perdiemSaturday`],
-                  sunday: (data as any)[`${rel.id}_perdiemSunday`]
-                }
-              });
-              
-              // Get per diem amount for this specific relationship
-              const relPerDiem = parseFloat((data as any)[`${rel.id}_perdiemAmount`] || '0');
-              totalPerDiemAmount += relPerDiem;
-              
-              // Aggregate daily breakdown from this relationship
-              const relPerDiemMonday = parseFloat((data as any)[`${rel.id}_perdiemMonday`] || '0');
-              const relPerDiemTuesday = parseFloat((data as any)[`${rel.id}_perdiemTuesday`] || '0');
-              const relPerDiemWednesday = parseFloat((data as any)[`${rel.id}_perdiemWednesday`] || '0');
-              const relPerDiemThursday = parseFloat((data as any)[`${rel.id}_perdiemThursday`] || '0');
-              const relPerDiemFriday = parseFloat((data as any)[`${rel.id}_perdiemFriday`] || '0');
-              const relPerDiemSaturday = parseFloat((data as any)[`${rel.id}_perdiemSaturday`] || '0');
-              const relPerDiemSunday = parseFloat((data as any)[`${rel.id}_perdiemSunday`] || '0');
-              
-              aggregatedPerDiemData.perdiemMonday += relPerDiemMonday;
-              aggregatedPerDiemData.perdiemTuesday += relPerDiemTuesday;
-              aggregatedPerDiemData.perdiemWednesday += relPerDiemWednesday;
-              aggregatedPerDiemData.perdiemThursday += relPerDiemThursday;
-              aggregatedPerDiemData.perdiemFriday += relPerDiemFriday;
-              aggregatedPerDiemData.perdiemSaturday += relPerDiemSaturday;
-              aggregatedPerDiemData.perdiemSunday += relPerDiemSunday;
-              
-              // Aggregate Other Pay for per diem relationships
-              const relOtherPay = (data as any)[`${rel.id}_otherPay`] || [];
-              if (relOtherPay.length > 0) {
-                aggregatedOtherPay.push(...relOtherPay);
-              }
-            }
-          }
-          
-          // Update the basic fields so PDF generator can access them
-          checkData.hours = totalHours;
-          checkData.perdiemAmount = totalPerDiemAmount > 0 ? totalPerDiemAmount : undefined;
-          checkData.otherPay = aggregatedOtherPay;
-          
-          // Store relationship-specific hours for proper display in modal
-          checkData.relationshipHours = relationshipHours;
-          
-          // Set the aggregated daily breakdown fields
-          // Check if any daily amounts are entered
-          const hasDailyAmounts = Object.values(aggregatedPerDiemData).some(amount => amount > 0);
-          
-          if (totalPerDiemAmount > 0 || hasDailyAmounts) {
-            checkData.perdiemBreakdown = hasDailyAmounts; // true if daily amounts, false if only total
-            
-            // Only add daily fields if they have values > 0
-            if (aggregatedPerDiemData.perdiemMonday > 0) checkData.perdiemMonday = aggregatedPerDiemData.perdiemMonday;
-            if (aggregatedPerDiemData.perdiemTuesday > 0) checkData.perdiemTuesday = aggregatedPerDiemData.perdiemTuesday;
-            if (aggregatedPerDiemData.perdiemWednesday > 0) checkData.perdiemWednesday = aggregatedPerDiemData.perdiemWednesday;
-            if (aggregatedPerDiemData.perdiemThursday > 0) checkData.perdiemThursday = aggregatedPerDiemData.perdiemThursday;
-            if (aggregatedPerDiemData.perdiemFriday > 0) checkData.perdiemFriday = aggregatedPerDiemData.perdiemFriday;
-            if (aggregatedPerDiemData.perdiemSaturday > 0) checkData.perdiemSaturday = aggregatedPerDiemData.perdiemSaturday;
-            if (aggregatedPerDiemData.perdiemSunday > 0) checkData.perdiemSunday = aggregatedPerDiemData.perdiemSunday;
-          }
-        }
-
-        // Add per diem fields only if they have values (for single-client checks only)
-        if (selectedClientId !== 'multiple') {
-          // Check for relationship-specific per diem data first (when employee has relationships)
-          const relationship = emp.clientPayTypeRelationships?.find(rel => rel.clientId === selectedClientId);
-          if (relationship && relationship.payType === 'perdiem') {
-            // Use relationship-specific fields
-            const relId = relationship.id;
-            if (data[`${relId}_perdiemBreakdown`] !== undefined) {
-              checkData.perdiemBreakdown = data[`${relId}_perdiemBreakdown`];
-            }
-            if (data[`${relId}_perdiemAmount`] && parseFloat(data[`${relId}_perdiemAmount`]) > 0) {
-              checkData.perdiemAmount = parseFloat(data[`${relId}_perdiemAmount`]);
-            }
-            if (data[`${relId}_perdiemMonday`] !== undefined && data[`${relId}_perdiemMonday`] !== '') {
-              checkData.perdiemMonday = parseFloat(data[`${relId}_perdiemMonday`]);
-            }
-            if (data[`${relId}_perdiemTuesday`] !== undefined && data[`${relId}_perdiemTuesday`] !== '') {
-              checkData.perdiemTuesday = parseFloat(data[`${relId}_perdiemTuesday`]);
-            }
-            if (data[`${relId}_perdiemWednesday`] !== undefined && data[`${relId}_perdiemWednesday`] !== '') {
-              checkData.perdiemWednesday = parseFloat(data[`${relId}_perdiemWednesday`]);
-            }
-            if (data[`${relId}_perdiemThursday`] !== undefined && data[`${relId}_perdiemThursday`] !== '') {
-              checkData.perdiemThursday = parseFloat(data[`${relId}_perdiemThursday`]);
-            }
-            if (data[`${relId}_perdiemFriday`] !== undefined && data[`${relId}_perdiemFriday`] !== '') {
-              checkData.perdiemFriday = parseFloat(data[`${relId}_perdiemFriday`]);
-            }
-            if (data[`${relId}_perdiemSaturday`] !== undefined && data[`${relId}_perdiemSaturday`] !== '') {
-              checkData.perdiemSaturday = parseFloat(data[`${relId}_perdiemSaturday`]);
-            }
-            if (data[`${relId}_perdiemSunday`] !== undefined && data[`${relId}_perdiemSunday`] !== '') {
-              checkData.perdiemSunday = parseFloat(data[`${relId}_perdiemSunday`]);
-            }
-          } else {
-            // Fallback to basic per diem fields (legacy support)
-            if (data.perdiemBreakdown !== undefined) {
-              checkData.perdiemBreakdown = data.perdiemBreakdown;
-            }
-            if (data.perdiemAmount && parseFloat(data.perdiemAmount) > 0) {
-              checkData.perdiemAmount = parseFloat(data.perdiemAmount);
-            }
-            if (data.perdiemMonday !== undefined && data.perdiemMonday !== '') {
-              checkData.perdiemMonday = parseFloat(data.perdiemMonday);
-            }
-            if (data.perdiemTuesday !== undefined && data.perdiemTuesday !== '') {
-              checkData.perdiemTuesday = parseFloat(data.perdiemTuesday);
-            }
-            if (data.perdiemWednesday !== undefined && data.perdiemWednesday !== '') {
-              checkData.perdiemWednesday = parseFloat(data.perdiemWednesday);
-            }
-            if (data.perdiemThursday !== undefined && data.perdiemThursday !== '') {
-              checkData.perdiemThursday = parseFloat(data.perdiemThursday);
-            }
-            if (data.perdiemFriday !== undefined && data.perdiemFriday !== '') {
-              checkData.perdiemFriday = parseFloat(data.perdiemFriday);
-            }
-            if (data.perdiemSaturday !== undefined && data.perdiemSaturday !== '') {
-              checkData.perdiemSaturday = parseFloat(data.perdiemSaturday);
-            }
-            if (data.perdiemSunday !== undefined && data.perdiemSunday !== '') {
-              checkData.perdiemSunday = parseFloat(data.perdiemSunday);
-            }
-          }
-        }
-
-        // Clean up the data - ensure no undefined values and set proper defaults
-        Object.keys(checkData).forEach(key => {
-          if (checkData[key] === undefined) {
-            // Set appropriate defaults based on field type
-            if (key === 'hours' || key === 'otHours' || key === 'holidayHours') {
-              checkData[key] = 0;
-            } else if (key === 'memo' || key === 'payRate') {
-              checkData[key] = '';
-            } else if (key === 'selectedRelationshipIds' || key === 'relationshipDetails') {
-              checkData[key] = [];
-            } else if (key === 'perdiemAmount') {
-              checkData[key] = 0;
-            } else if (key.startsWith('perdiem') && key !== 'perdiemBreakdown') {
-              // Don't override per diem fields that were set by relationship aggregation
-              // Only set to 0 if they weren't set by the aggregation logic above
-              if (!checkData.relationshipDetails || checkData.relationshipDetails.length === 0) {
-                checkData[key] = 0;
-              }
-            }
-          }
-        });
-
-        // Add relationshipDetails to checkData for proper display
-        checkData.relationshipDetails = relationshipDetails;
+        // Always add daily per diem breakdown fields for consistent data format
+        Object.assign(checkData, aggregatedPerDiemData);
+        
+        console.log(`🔍 DEBUG: Final checkData for ${emp.name}:`, checkData);
         
         console.log('🔍 DEBUG: Final checkData being saved to Firestore:', {
           checkId: checkData.id || 'NEW_CHECK',
@@ -1902,22 +1623,27 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
       console.log(`✅ Successfully created ${createdChecks.length} checks`);
       setShowSuccessMessage(true);
       
+      // Clear all selections and inputs from all tabs to start fresh
+      console.log("🔍 DEBUG: Clearing all tab data (selections and inputs) to start fresh");
+      setTabData({});
+      
       // Show floating menu with navigation options
       const company = companies.find(c => c.id === selectedCompanyId);
-      const client = selectedClientId !== 'multiple' ? clients.find(c => c.id === selectedClientId) : null;
+      const client = createdChecks[0]?.clientId && createdChecks[0].clientId !== 'multiple' 
+        ? clients.find(c => c.id === createdChecks[0].clientId) 
+        : null;
       
       console.log('🔍 DEBUG: Success message - selectedCompanyId:', selectedCompanyId);
-      console.log('🔍 DEBUG: Success message - selectedClientId:', selectedClientId);
       console.log('🔍 DEBUG: Success message - found company:', company?.name);
       console.log('🔍 DEBUG: Success message - found client:', client?.name);
       
       setFloatingMenu({
         open: true,
         companyId: selectedCompanyId,
-        clientId: selectedClientId !== 'multiple' ? selectedClientId : null,
+        clientId: createdChecks[0]?.clientId && createdChecks[0].clientId !== 'multiple' ? createdChecks[0].clientId : null,
         checkId: createdChecks[0]?.id || null,
         companyName: company?.name || 'Unknown Company',
-        clientName: client?.name || 'Multiple Clients'
+        clientName: client?.name || (createdChecks[0]?.clientId === 'multiple' ? 'Multiple Clients' : 'Unknown Client')
       });
       
       // Clear selections and inputs
@@ -1964,36 +1690,160 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
       return;
     }
 
-    const selectedEmployeeIds = Object.keys(selectedEmployees).filter(
-      (id) => selectedEmployees[id]
-    );
+    console.log(`🔍 [Review] selectedClientId: ${selectedClientId}`);
+    console.log(`🔍 [Review] companyClients:`, companyClients.map(c => ({ id: c.id, name: c.name })));
+    console.log(`🔍 [Review] tabData:`, tabData);
 
-    if (selectedEmployeeIds.length === 0) {
+    // Aggregate employees from ALL tabs
+    const allSelectedEmployeeIds = new Set<string>();
+    Object.values(tabData).forEach(tab => {
+      Object.keys(tab.selectedEmployees).forEach(empId => {
+        if (tab.selectedEmployees[empId]) {
+          allSelectedEmployeeIds.add(empId);
+        }
+      });
+    });
+
+    if (allSelectedEmployeeIds.size === 0) {
       alert("Please select at least one employee.");
       return;
     }
 
-    console.log(`🔍 [Review] selectedClientId: ${selectedClientId}`);
-    console.log(`🔍 [Review] companyClients:`, companyClients.map(c => ({ id: c.id, name: c.name })));
+    console.log(`🔍 [Review] Found ${allSelectedEmployeeIds.size} employees across all tabs`);
 
-    // Prepare review data
-    const reviewDataArray = selectedEmployeeIds.map(empId => {
+    // Prepare review data - aggregate amounts from ALL tabs for each employee
+    const reviewDataArray = Array.from(allSelectedEmployeeIds).map(empId => {
       const emp = employees.find((e) => e.id === empId);
       if (!emp) return null;
-      
-      const data = inputs[empId];
-      if (!data) return null;
+
+      let totalAmount = 0;
+      let hourlyTotal = 0;
+      let perDiemTotal = 0;
+      const clientsWorked: string[] = [];
+      const clientBreakdown: Array<{
+        clientName: string;
+        companyName: string;
+        amount: number;
+        hourlyAmount: number;
+        perDiemAmount: number;
+        payType: string;
+        details: Array<{label: string; value: string}>;
+      }> = [];
+
+      // Loop through ALL tabs to aggregate this employee's data
+      Object.entries(tabData).forEach(([tabId, tabInfo]) => {
+        const data = tabInfo.inputs[empId];
+        if (data && tabInfo.selectedEmployees[empId]) {
+          const tabAmount = parseFloat(calculateAmount(emp, data));
+          const tabHourly = parseFloat(calculateHourlyTotal(emp, data));
+          const tabPerDiem = parseFloat(calculatePerDiemTotal(data));
+          
+          if (tabAmount > 0) {
+            totalAmount += tabAmount;
+            hourlyTotal += tabHourly;
+            perDiemTotal += tabPerDiem;
+            
+            // Track which client this tab represents with full details
+            const client = companyClients.find(c => c.id === tabId);
+            if (client) {
+              clientsWorked.push(client.name);
+              
+              // Find the company for this client
+              const company = companies.find(c => client.companyIds?.includes(c.id));
+              
+              // Find the relationship for this client to get relationship-specific data
+              const relationship = emp.clientPayTypeRelationships?.find((rel: any) => rel.clientId === tabId);
+              
+              // Determine pay type from the relationship's actual payType field
+              const payType = relationship?.payType === 'hourly' ? 'Hourly' : 'Per Diem';
+              
+              // Build detailed line items for this client
+              const details: Array<{label: string; value: string}> = [];
+              
+              if (relationship) {
+                const relId = relationship.id;
+                
+                // Check for hourly data
+                const hours = parseFloat((data as any)[`${relId}_hours`] || '0');
+                const otHours = parseFloat((data as any)[`${relId}_otHours`] || '0');
+                const holidayHours = parseFloat((data as any)[`${relId}_holidayHours`] || '0');
+                const rate = parseFloat(relationship.payRate || '0');
+                
+                if (hours > 0) details.push({ label: `${hours} hrs × $${rate}`, value: `$${(hours * rate).toFixed(2)}` });
+                if (otHours > 0) details.push({ label: `${otHours} OT × $${(rate * 1.5).toFixed(2)}`, value: `$${(otHours * rate * 1.5).toFixed(2)}` });
+                if (holidayHours > 0) details.push({ label: `${holidayHours} holiday × $${(rate * 2).toFixed(2)}`, value: `$${(holidayHours * rate * 2).toFixed(2)}` });
+                
+                // Check for per diem data
+                const perdiemBreakdown = (data as any)[`${relId}_perdiemBreakdown`];
+                if (perdiemBreakdown) {
+                  // Daily breakdown mode
+                  const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+                  days.forEach(day => {
+                    const dayValue = parseFloat((data as any)[`${relId}_perdiem${day}`] || '0');
+                    if (dayValue > 0) {
+                      details.push({ label: day, value: `$${dayValue.toFixed(2)}` });
+                    }
+                  });
+                } else {
+                  // Full amount mode
+                  const perdiemAmount = parseFloat((data as any)[`${relId}_perdiemAmount`] || '0');
+                  if (perdiemAmount > 0) {
+                    details.push({ label: 'Per Diem', value: `$${perdiemAmount.toFixed(2)}` });
+                  }
+                }
+                
+                // Add Other Pay items
+                const otherPay = (data as any)[`${relId}_otherPay`] || [];
+                otherPay.forEach((item: any) => {
+                  if (item.amount && parseFloat(item.amount) > 0) {
+                    details.push({ 
+                      label: item.description || 'Other Pay', 
+                      value: `$${parseFloat(item.amount).toFixed(2)}` 
+                    });
+                  }
+                });
+              }
+              
+              clientBreakdown.push({
+                clientName: client.name,
+                companyName: company?.name || 'Unknown',
+                amount: tabAmount,
+                hourlyAmount: tabHourly,
+                perDiemAmount: tabPerDiem,
+                payType: payType,
+                details: details
+              });
+            }
+          }
+          
+          console.log(`🔍 [Review] ${emp.name} - ${tabId}: $${tabAmount.toFixed(2)} (hourly: $${tabHourly.toFixed(2)}, perdiem: $${tabPerDiem.toFixed(2)})`);
+        }
+      });
+
+      if (totalAmount === 0) return null;
+
+      console.log(`🔍 [Review] ${emp.name} - TOTAL: $${totalAmount.toFixed(2)} across ${clientsWorked.length} clients: ${clientsWorked.join(', ')}`);
+      console.log(`🔍 [Review] ${emp.name} - Breakdown:`, clientBreakdown);
 
       return {
         employee: emp,
-        input: data,
-        calculatedAmount: parseFloat(calculateAmount(emp, data)),
-        hourlyTotal: parseFloat(calculateHourlyTotal(emp, data)),
-        perDiemTotal: parseFloat(calculatePerDiemTotal(data))
+        input: {} as PayInput, // Not used for multi-tab aggregation
+        calculatedAmount: totalAmount,
+        hourlyTotal: hourlyTotal,
+        perDiemTotal: perDiemTotal,
+        clientsWorked: clientsWorked,
+        clientBreakdown: clientBreakdown
       };
     }).filter((item): item is NonNullable<typeof item> => item !== null);
 
-    setReviewData(reviewDataArray);
+    console.log(`🔍 [Review] Final review data:`, reviewDataArray.map(r => ({ name: r.employee.name, amount: r.calculatedAmount, clients: r.clientsWorked })));
+
+    // Sort employees alphabetically by name
+    const sortedReviewData = reviewDataArray.sort((a, b) => 
+      a.employee.name.localeCompare(b.employee.name)
+    );
+
+    setReviewData(sortedReviewData);
     setShowReviewPanel(true);
   };
 
@@ -2043,8 +1893,6 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                   const companyClients = clients.filter(client => client.companyIds?.includes(c.id));
                   if (companyClients.length > 0) {
                     setSelectedClientId(companyClients[0].id);
-                  } else {
-                    setSelectedClientId('multiple');
                   }
                 }}
               >
@@ -2226,7 +2074,7 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
           </Box>
 
           {/* Enhanced Client Selection with Tabs */}
-          {companyClients.length > 1 && (
+          {clientsWithActiveEmployees.length > 0 && (
             <Box sx={{ mb: 3 }}>
               <Typography variant="h6" gutterBottom sx={{ mb: 2 }}>
                  Select Client for This Work
@@ -2235,7 +2083,7 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
               {/* Client Tabs */}
               <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
                 <Tabs 
-                  value={selectedClientId || 'multiple'} 
+                  value={selectedClientId || clientsWithActiveEmployees[0]?.id || ''} 
                   onChange={(e: React.SyntheticEvent, newValue: string) => setSelectedClientId(newValue)}
                   variant="scrollable"
                   scrollButtons="auto"
@@ -2247,8 +2095,8 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                     }
                   }}
                 >
-                  {/* Individual Client Tabs */}
-                  {filteredCompanyClients.map((client) => (
+                  {/* Individual Client Tabs - Show ALL clients */}
+                  {clientsWithActiveEmployees.map((client) => (
                     <Tab
                       key={client.id}
                       label={
@@ -2272,26 +2120,33 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                       }}
                     />
                   ))}
-                  
-                  {/* Multiple Clients Tab */}
-                  <Tab
-                    label={
-                      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                        <span>Multiple Clients</span>
-                      </Box>
-                    }
-                    value="multiple"
-                    sx={{ 
-                      minWidth: '120px',
-                      '&.Mui-selected': { 
-                        backgroundColor: 'secondary.light',
-                        color: 'secondary.contrastText',
-                        borderRadius: '8px 8px 0 0'
-                      }
-                    }}
-                  />
                 </Tabs>
+                      </Box>
+              
+              {/* Employee Search Controls */}
+              <Paper sx={{ p: 2, mb: 2, bgcolor: '#f5f5f5' }} elevation={1}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+                  <Typography variant="subtitle2" sx={{ minWidth: 120, fontWeight: 'bold' }}>
+                    Search Employees:
+                  </Typography>
+                  <TextField
+                    size="small"
+                    placeholder="Type employee name to search..."
+                    value={employeeSearchTerm}
+                    onChange={(e) => setEmployeeSearchTerm(e.target.value)}
+                    sx={{ minWidth: 250, flexGrow: 1, maxWidth: 400 }}
+                  />
+                  {employeeSearchTerm && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => setEmployeeSearchTerm("")}
+                    >
+                      Clear Search
+                    </Button>
+                  )}
               </Box>
+              </Paper>
               
               {/* Tab Content */}
               {/* Empty box removed for cleaner interface */}
@@ -2302,9 +2157,9 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                   variant="outlined"
                   size="small"
                   onClick={() => {
-                    // Clear selections only for the current tab
-                    if (selectedClientId && selectedClientId !== 'multiple') {
-                      // Single client tab: clear only employees for this client
+                    // Clear selections for the current client tab
+                    if (selectedClientId) {
+                      // Clear only employees for this client
                       const currentClientEmployees = filteredEmployees.filter(emp => 
                         emp.clientPayTypeRelationships?.some(rel => rel.clientId === selectedClientId) ||
                         emp.clientId === selectedClientId
@@ -2315,23 +2170,6 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                       
                       // Clear selections and inputs only for current client employees
                       currentClientEmployees.forEach(emp => {
-                        newSelectedEmployees[emp.id] = false;
-                        delete newInputs[emp.id];
-                      });
-                      
-                      setSelectedEmployees(newSelectedEmployees);
-                      setInputs(newInputs);
-                    } else if (selectedClientId === 'multiple') {
-                      // Multiple clients tab: clear only employees with multiple relationships
-                      const multipleClientEmployees = filteredEmployees.filter(emp => 
-                        emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 1
-                      );
-                      
-                      const newSelectedEmployees = { ...selectedEmployees };
-                      const newInputs = { ...inputs };
-                      
-                      // Clear selections and inputs only for multiple client employees
-                      multipleClientEmployees.forEach(emp => {
                         newSelectedEmployees[emp.id] = false;
                         delete newInputs[emp.id];
                       });
@@ -2350,11 +2188,14 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                       variant="contained"
                       size="small"
                       onClick={() => {
-                        // Auto-select employees for this client
-                        const clientEmployees = filteredEmployees.filter(emp => 
+                        // Select all employees who work for the currently selected client
+                        const clientEmployees = selectedClientId 
+                          ? filteredEmployees.filter(emp => 
                           emp.clientPayTypeRelationships?.some(rel => rel.clientId === selectedClientId) ||
                           emp.clientId === selectedClientId
-                        );
+                            )
+                          : [];
+                        
                         const newSelectedEmployees = { ...selectedEmployees };
                         const newInputs = { ...inputs };
                         
@@ -2363,8 +2204,9 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                           // Auto-set payment methods and relationships for this client
                           const defaultPaymentMethods = getDefaultPaymentMethods(emp);
                           const defaultRelationshipIds = getDefaultRelationshipIds(emp);
+                          const existingData = newInputs[emp.id] || {};
                           newInputs[emp.id] = {
-                            ...newInputs[emp.id],
+                            ...existingData,
                             paymentMethods: defaultPaymentMethods,
                             selectedRelationshipIds: defaultRelationshipIds,
                             hours: "",
@@ -2380,6 +2222,7 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                             perdiemFriday: "",
                             perdiemSaturday: "",
                             perdiemSunday: "",
+                            checkDate: defaultCheckDate ? createLocalDate(defaultCheckDate) : (existingData.checkDate || null),
                           };
                         });
                         
@@ -2395,15 +2238,6 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                   </>
                 )}
               </Box>
-            </Box>
-          )}
-
-          {/* Show single client info if only one client */}
-          {companyClients.length === 1 && (
-            <Box sx={{ mb: 3, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
-              <Typography variant="body2" color="text.secondary">
-                Client: <strong>{companyClients[0].name}</strong>
-              </Typography>
             </Box>
           )}
 
@@ -2426,77 +2260,87 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
               });
             }
             
-            if (selectedClientId && selectedClientId !== 'multiple') {
-              // Single client tab: show employees for this specific client
+            if (selectedClientId) {
+              // Show ALL employees who work for this client (regardless of other relationships)
               const client = companyClients.find(c => c.id === selectedClientId);
               if (client) {
                 console.log(`🔍 Filtering for client: ${client.name} (${client.id})`);
                 console.log(`🔍 Total employees before filtering: ${filteredEmployees.length}`);
                 
                 if (client.name.toLowerCase().includes('per diem')) {
-                  // Per Diem tab: show employees with per diem relationships for this client
+                  // Per Diem tab: show ALL employees with per diem relationships for this client
                   employeesToShow = filteredEmployees.filter(emp => {
                     // Check if employee has relationships with this client and per diem pay type
                     const hasPerDiemForThisClient = emp.clientPayTypeRelationships?.some(rel => 
-                      rel.clientId === selectedClientId && rel.payType === 'perdiem'
+                      rel.clientId === selectedClientId && rel.payType === 'perdiem' && rel.active
                     );
-                    // Check legacy fields
-                    const hasLegacyPerDiem = emp.clientId === selectedClientId && emp.payType === 'perdiem';
-                    // Check if employee has multiple relationships (should go to multiple tab)
-                    const hasMultiple = emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 1;
                     
-                    const shouldShow = (hasPerDiemForThisClient || hasLegacyPerDiem) && !hasMultiple;
+                    // Check legacy fields - only count if employee has NO relationships
+                    const hasLegacyPerDiem = emp.clientId === selectedClientId && emp.payType === 'perdiem';
+                    const legacyEmployeeWithPerDiem = hasLegacyPerDiem && (!emp.clientPayTypeRelationships || emp.clientPayTypeRelationships.length === 0);
+                    
+                    const shouldShow = hasPerDiemForThisClient || legacyEmployeeWithPerDiem;
                     if (emp.name === 'Domingo Perez Lopez') {
-                      console.log(`🔍 Domingo: hasPerDiemForThisClient=${hasPerDiemForThisClient}, hasLegacyPerDiem=${hasLegacyPerDiem}, hasMultiple=${hasMultiple}, shouldShow=${shouldShow}`);
+                      console.log(`🔍 Domingo: hasPerDiemForThisClient=${hasPerDiemForThisClient}, hasLegacyPerDiem=${hasLegacyPerDiem}, shouldShow=${shouldShow}`);
                     }
                     return shouldShow;
                   });
                 } else if (client.name.toLowerCase().includes('hourly')) {
-                  // Hourly tab: show employees with hourly relationships for this client
+                  // Hourly tab: show ALL employees with hourly relationships for this client
                   employeesToShow = filteredEmployees.filter(emp => {
+                    
                     // Check if employee has relationships with this client and hourly pay type
                     const hasHourlyForThisClient = emp.clientPayTypeRelationships?.some(rel => 
-                      rel.clientId === selectedClientId && rel.payType === 'hourly'
+                      rel.clientId === selectedClientId && rel.payType === 'hourly' && rel.active
                     );
-                    // Check legacy fields
-                    const hasLegacyHourly = emp.clientId === selectedClientId && emp.payType === 'hourly';
-                    // Check if employee has multiple relationships (should go to multiple tab)
-                    const hasMultiple = emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 1;
                     
-                    const shouldShow = (hasHourlyForThisClient || hasLegacyHourly) && !hasMultiple;
+                    // Check legacy fields - only count if employee has NO relationships
+                    const hasLegacyHourly = emp.clientId === selectedClientId && emp.payType === 'hourly';
+                    const legacyEmployeeWithHourly = hasLegacyHourly && (!emp.clientPayTypeRelationships || emp.clientPayTypeRelationships.length === 0);
+                    
+                    const shouldShow = hasHourlyForThisClient || legacyEmployeeWithHourly;
                     if (emp.name === 'Domingo Perez Lopez') {
-                      console.log(`🔍 Domingo: hasHourlyForThisClient=${hasHourlyForThisClient}, hasLegacyHourly=${hasLegacyHourly}, hasMultiple=${hasMultiple}, shouldShow=${shouldShow}`);
+                      console.log(`🔍 Domingo: hasHourlyForThisClient=${hasHourlyForThisClient}, hasLegacyHourly=${hasLegacyHourly}, shouldShow=${shouldShow}`);
                     }
                     return shouldShow;
                   });
                 } else {
-                  // Other client tabs: show employees for this specific client (but not multiple)
+                  // Other client tabs: show ALL employees for this specific client
                   employeesToShow = filteredEmployees.filter(emp => {
-                    const hasThisClient = emp.clientPayTypeRelationships?.some(rel => rel.clientId === selectedClientId) ||
-                                        emp.clientId === selectedClientId;
-                    const hasMultiple = emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 1;
-                    return hasThisClient && !hasMultiple;
+                    // Check if employee has any active relationship with this client
+                    const hasActiveRelationshipWithThisClient = emp.clientPayTypeRelationships?.some(rel => 
+                      rel.clientId === selectedClientId && rel.active
+                    );
+                    
+                    // Check legacy fields - only count if employee has NO relationships
+                    const hasLegacyClient = emp.clientId === selectedClientId;
+                    const legacyEmployeeWithSingleClient = hasLegacyClient && (!emp.clientPayTypeRelationships || emp.clientPayTypeRelationships.length === 0);
+                    
+                    const shouldShow = hasActiveRelationshipWithThisClient || legacyEmployeeWithSingleClient;
+                    
+                    return shouldShow;
                   });
                 }
                 
                 console.log(`🔍 Employees after filtering: ${employeesToShow.length}`);
                 console.log(`🔍 Employee names:`, employeesToShow.map(emp => emp.name));
               }
-            } else if (selectedClientId === 'multiple') {
-              // Multiple clients tab: show only employees with multiple client relationships
-              employeesToShow = filteredEmployees.filter(emp => 
-                emp.clientPayTypeRelationships && 
-                emp.clientPayTypeRelationships.length > 1
-              );
-              console.log(`🔍 Multiple clients tab: ${employeesToShow.length} employees (filtered for multiple relationships)`);
-              console.log(`🔍 Multiple clients names:`, employeesToShow.map(emp => emp.name));
-              console.log(`🔍 Employee payment types:`, employeesToShow.map(emp => ({
-                name: emp.name,
-                payType: emp.payType,
-                payTypes: emp.payTypes,
-                clientPayTypeRelationships: emp.clientPayTypeRelationships?.length || 0
-              })));
             }
+            
+            // Apply search filter
+            if (employeeSearchTerm) {
+              employeesToShow = employeesToShow.filter(emp => 
+                emp.name.toLowerCase().includes(employeeSearchTerm.toLowerCase())
+              );
+            }
+            
+            // Always sort alphabetically by first name
+            employeesToShow = employeesToShow.sort((a, b) => {
+              const firstNameA = a.name.split(' ')[0].toLowerCase();
+              const firstNameB = b.name.split(' ')[0].toLowerCase();
+              return firstNameA.localeCompare(firstNameB);
+            });
+            
             const employeesWithData = employeesToShow.filter((emp: any) => {
               const data = inputs[emp.id];
               if (!data) return false;
@@ -2551,25 +2395,73 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                         type="date"
                         label="Apply to All Employees"
                         value={defaultCheckDate}
+                        onClick={(e) => {
+                          // Apply the current date to ALL employees across ALL tabs
+                          if (defaultCheckDate) {
+                            const dateValue = createLocalDate(defaultCheckDate);
+                            
+                            setTabData(prev => {
+                              const updatedTabData = { ...prev };
+                              
+                              // Apply date to all tabs
+                              Object.keys(updatedTabData).forEach(tabId => {
+                                const tabInfo = updatedTabData[tabId];
+                                const updatedInputs = { ...tabInfo.inputs };
+                                
+                                // Apply date to all employees in this tab that have inputs
+                                Object.keys(updatedInputs).forEach(empId => {
+                                  updatedInputs[empId] = {
+                                    ...updatedInputs[empId],
+                                    checkDate: dateValue
+                                  };
+                                });
+                                
+                                updatedTabData[tabId] = {
+                                  ...tabInfo,
+                                  inputs: updatedInputs
+                                };
+                              });
+                              
+                              return updatedTabData;
+                            });
+                          }
+                        }}
                         onChange={(e) => {
                           if (e.target.value) {
                             // Update the default check date state
                             setDefaultCheckDate(e.target.value);
                             
-                            // Apply this date to all employees
+                            // Apply this date to ALL employees across ALL tabs
                             const dateValue = createLocalDate(e.target.value);
-                            const newInputs = { ...inputs };
-                            employeesToShow.forEach((emp: any) => {
-                              newInputs[emp.id] = {
-                                ...newInputs[emp.id],
-                                checkDate: dateValue
-                              };
+                            
+                            setTabData(prev => {
+                              const updatedTabData = { ...prev };
+                              
+                              // Apply date to all tabs
+                              Object.keys(updatedTabData).forEach(tabId => {
+                                const tabInfo = updatedTabData[tabId];
+                                const updatedInputs = { ...tabInfo.inputs };
+                                
+                                // Apply date to all employees in this tab that have inputs
+                                Object.keys(updatedInputs).forEach(empId => {
+                                  updatedInputs[empId] = {
+                                    ...updatedInputs[empId],
+                                    checkDate: dateValue
+                                  };
+                                });
+                                
+                                updatedTabData[tabId] = {
+                                  ...tabInfo,
+                                  inputs: updatedInputs
+                                };
+                              });
+                              
+                              return updatedTabData;
                             });
-                            setInputs(newInputs);
                           }
                         }}
                         InputLabelProps={{ shrink: true }}
-                        helperText="This date will be applied to all employees. You can still modify individual employee dates below."
+                        helperText="Click or change this date to apply it to all employees across all tabs. New employees selected will automatically get this date."
                         sx={{ flex: 1 }}
                       />
                     </Box>
@@ -2605,60 +2497,22 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                     mt: 1,
                   }}
                 >
-                  {/* Client-Pay Type Relationship Selector - Only show on Multiple Clients tab */}
-                  {selectedClientId === 'multiple' && emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 0 && (
-                    <FormControl sx={{ width: 400 }}>
-                      <InputLabel>Client-Pay Type Relationships</InputLabel>
-                      <Select
-                        multiple
-                        value={inputs[emp.id]?.selectedRelationshipIds || []}
-                        onChange={(e) => {
-                          const relationshipIds = e.target.value as string[];
-                          handleInputChange(emp.id, "selectedRelationshipIds", relationshipIds);
-                          
-                          // Auto-select all pay types from selected relationships
-                          const selectedRelationships = emp.clientPayTypeRelationships?.filter(r => 
-                            relationshipIds.includes(r.id)
-                          ) || [];
-                          const payTypes = selectedRelationships.map(r => r.payType);
-                          handleInputChange(emp.id, "paymentMethods", payTypes);
-                        }}
-                        label="Client-Pay Type Relationships"
-                        renderValue={(selected) => (selected as string[]).map(id => {
-                          const relationship = emp.clientPayTypeRelationships?.find(r => r.id === id);
-                          return relationship ? `${relationship.clientName} - ${relationship.payType === 'hourly' ? 'Hourly' : 'Per Diem'}` : id;
-                        }).join(', ')}
-                        MenuProps={{
-                          PaperProps: {
-                            style: {
-                              maxHeight: 300
-                            }
-                          }
-                        }}
-                      >
-                        {emp.clientPayTypeRelationships
-                          .filter(rel => rel.active)
-                          .map((relationship) => (
-                            <MenuItem key={relationship.id} value={relationship.id}>
-                              <Checkbox checked={(inputs[emp.id]?.selectedRelationshipIds || []).indexOf(relationship.id) > -1} />
-                              <ListItemText primary={`${relationship.clientName} - ${relationship.payType === 'hourly' ? 'Hourly' : 'Per Diem'}`} />
-                            </MenuItem>
-                          ))}
-                      </Select>
-                    </FormControl>
-                  )}
+                  {/* Relationship selector removed - now auto-selected based on current client tab */}
                   
 
                   
 
                   
-                  {/* Dynamic Payment Sections Based on Selected Relationships */}
-                  {selectedClientId === 'multiple' && inputs[emp.id]?.selectedRelationshipIds && (inputs[emp.id]?.selectedRelationshipIds?.length || 0) > 0 && (
+                  {/* Dynamic Payment Sections Based on Current Client Tab */}
+                  {selectedClientId && inputs[emp.id]?.selectedRelationshipIds && (inputs[emp.id]?.selectedRelationshipIds?.length || 0) > 0 && (
                     <>
-                      {/* Get selected relationships */}
+                      {/* Get relationships for the current client tab only */}
                   {(() => {
                         const selectedRelationships = emp.clientPayTypeRelationships
-                          ?.filter((rel: any) => inputs[emp.id]?.selectedRelationshipIds?.includes(rel.id)) || [];
+                          ?.filter((rel: any) => 
+                            inputs[emp.id]?.selectedRelationshipIds?.includes(rel.id) && 
+                            rel.clientId === selectedClientId
+                          ) || [];
                         
                         return selectedRelationships.map((relationship: any, index: number) => {
                           const isHourly = relationship.payType === 'hourly';
@@ -2693,7 +2547,10 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                                   alignItems: 'center',
                                   gap: 0.5
                                 }}>
-                                  {relationship.clientName} - {relationship.payType === 'hourly' ? 'Hourly' : 'Per Diem'}
+                                  {(() => {
+                                    const client = clients.find(c => c.id === relationship.clientId);
+                                    return client ? client.name : relationship.clientName;
+                                  })()} - {relationship.payType === 'hourly' ? 'Hourly' : 'Per Diem'}
                                 </Typography>
                                 <Button
                                   size="small"
@@ -3055,9 +2912,34 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                   )}
 
                   {/* Legacy Single Client Support - Keep for backward compatibility */}
-                  {selectedClientId !== 'multiple' && (
+                  {/* Only show legacy sections if employee has NO relationships and none selected in inputs */}
+                  {(() => {
+                    console.log(`🔍 [Legacy Gate] ${emp.name}:`, {
+                      selectedClientId,
+                      hasRelationships: !!(emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 0),
+                      relationshipsCount: emp.clientPayTypeRelationships?.length || 0,
+                      selectedRelationshipIds: inputs[emp.id]?.selectedRelationshipIds,
+                      selectedRelationshipIdsLength: inputs[emp.id]?.selectedRelationshipIds?.length || 0,
+                      shouldShowLegacy: selectedClientId !== 'multiple' &&
+                        (!emp.clientPayTypeRelationships || emp.clientPayTypeRelationships.length === 0) &&
+                        !(((inputs[emp.id]?.selectedRelationshipIds?.length) ?? 0) > 0)
+                    });
+                    return null;
+                  })()}
+                  {selectedClientId !== 'multiple' &&
+                    (!emp.clientPayTypeRelationships || emp.clientPayTypeRelationships.length === 0) &&
+                    !(((inputs[emp.id]?.selectedRelationshipIds?.length) ?? 0) > 0) && (
                     <>
                       {/* Hourly Section - Show on hourly clients */}
+                      {(() => {
+                        console.log(`🔍 [Legacy Hourly Check] ${emp.name}:`, {
+                          selectedClientId,
+                          payTypes: emp.payTypes,
+                          includesHourly: emp.payTypes?.includes('hourly'),
+                          willShowHourly: selectedClientId && emp.payTypes?.includes('hourly')
+                        });
+                        return null;
+                      })()}
                       {selectedClientId && emp.payTypes?.includes('hourly') && (
                     <Box sx={{ 
                       p: 1.5, 
@@ -3366,7 +3248,16 @@ setTimeout(() => setShowSuccessMessage(false), 3000); // Auto-hide after 3 secon
                   )}
                   
                       {/* Per Diem Section - Show on per diem clients */}
-                      {console.log('🔍 DEBUG per diem condition:', { selectedClientId, empName: emp.name, payTypes: emp.payTypes, includesPerdiem: emp.payTypes?.includes('perdiem'), condition: selectedClientId && emp.payTypes?.includes('perdiem') })}
+                      {(() => {
+                        console.log('🔍 [Legacy Per Diem Check]', {
+                          empName: emp.name,
+                          selectedClientId,
+                          payTypes: emp.payTypes,
+                          includesPerdiem: emp.payTypes?.includes('perdiem'),
+                          willShowPerDiem: selectedClientId && emp.payTypes?.includes('perdiem')
+                        });
+                        return null;
+                      })()}
                       {selectedClientId && emp.payTypes?.includes('perdiem') && (
                     <Box sx={{ 
                       p: 1.5, 
@@ -4517,11 +4408,138 @@ return employeesWithData.length > 0 && (
 
                 {/* Client Info */}
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                  {selectedClientId === 'multiple' ? 'Multiple Clients' : 
-                   companyClients.find(c => c.id === selectedClientId)?.name || 'Unknown Client'}
+                  {item.clientsWorked && item.clientsWorked.length > 1
+                    ? `Multiple Clients: ${item.clientsWorked.join(', ')}`
+                    : item.clientsWorked && item.clientsWorked.length === 1
+                    ? item.clientsWorked[0]
+                    : 'Unknown Client'}
                 </Typography>
 
-                                {/* Calculation Breakdown */}
+                {/* Relationship Breakdown */}
+                {item.clientBreakdown && item.clientBreakdown.length > 0 && (
+                  <Box sx={{ 
+                    mb: 1, 
+                    backgroundColor: '#f8f9fa',
+                    border: '1px solid #e9ecef',
+                    borderRadius: '6px',
+                    padding: '10px',
+                    fontSize: '0.7rem'
+                  }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ 
+                      fontWeight: 'bold',
+                      display: 'block',
+                      mb: 1,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.5px',
+                      fontSize: '0.65rem'
+                    }}>
+                      Relationship Breakdown
+                    </Typography>
+                    
+                    <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.7rem' }}>
+                      <Box component="tbody">
+                        {item.clientBreakdown.map((breakdown, idx) => (
+                          <React.Fragment key={idx}>
+                            {/* Client Header Row */}
+                            <Box component="tr" sx={{ 
+                              backgroundColor: breakdown.payType === 'Hourly' ? '#e3f2fd' : '#fff8e1'
+                            }}>
+                              <Box component="td" sx={{ 
+                                py: 0.5, 
+                                px: 1,
+                                fontWeight: 'bold',
+                                fontSize: '0.75rem',
+                                color: breakdown.payType === 'Hourly' ? '#1976d2' : '#f57c00'
+                              }}>
+                                {breakdown.clientName}
+                              </Box>
+                              <Box component="td" sx={{ 
+                                py: 0.5, 
+                                px: 1,
+                                textAlign: 'right',
+                                fontSize: '0.6rem',
+                                fontWeight: 'bold',
+                                color: breakdown.payType === 'Hourly' ? '#1976d2' : '#f57c00'
+                              }}>
+                                {breakdown.payType}
+                              </Box>
+                            </Box>
+                            
+                            {/* Detail Rows */}
+                            {breakdown.details.map((detail, detailIdx) => (
+                              <Box component="tr" key={detailIdx}>
+                                <Box component="td" sx={{ 
+                                  py: 0.25, 
+                                  px: 1,
+                                  pl: 2,
+                                  color: '#666',
+                                  fontSize: '0.7rem'
+                                }}>
+                                  {detail.label}
+                                </Box>
+                                <Box component="td" sx={{ 
+                                  py: 0.25, 
+                                  px: 1,
+                                  textAlign: 'right',
+                                  fontFamily: 'monospace',
+                                  color: '#666',
+                                  fontSize: '0.7rem'
+                                }}>
+                                  {detail.value}
+                                </Box>
+                              </Box>
+                            ))}
+                            
+                            {/* Subtotal Row */}
+                            <Box component="tr" sx={{ 
+                              borderTop: '1px solid #e9ecef',
+                              borderBottom: idx < item.clientBreakdown!.length - 1 ? '1px solid #dee2e6' : 'none'
+                            }}>
+                              <Box component="td" sx={{ 
+                                py: 0.4, 
+                                px: 1,
+                                pl: 2,
+                                fontWeight: 'bold',
+                                fontSize: '0.7rem'
+                              }}>
+                                Subtotal
+                              </Box>
+                              <Box component="td" sx={{ 
+                                py: 0.4, 
+                                px: 1,
+                                textAlign: 'right',
+                                fontFamily: 'monospace',
+                                fontWeight: 'bold',
+                                fontSize: '0.7rem'
+                              }}>
+                                ${breakdown.amount.toFixed(2)}
+                              </Box>
+                            </Box>
+                          </React.Fragment>
+                        ))}
+                      </Box>
+                    </Box>
+                    
+                    <Box sx={{ 
+                      mt: 1.5, 
+                      pt: 1, 
+                      borderTop: '2px solid #dee2e6',
+                      display: 'flex', 
+                      justifyContent: 'space-between',
+                      alignItems: 'center'
+                    }}>
+                      <Typography variant="subtitle2" fontWeight="bold" sx={{ color: '#28a745', fontSize: '0.85rem' }}>
+                        TOTAL
+                      </Typography>
+                      <Typography variant="subtitle1" fontWeight="bold" sx={{ color: '#28a745', fontSize: '1rem', fontFamily: 'monospace' }}>
+                        ${item.calculatedAmount.toFixed(2)}
+                      </Typography>
+                    </Box>
+                  </Box>
+                )}
+                
+                {/* Fallback: Old Calculation Breakdown for legacy data */}
+                {(!item.clientBreakdown || item.clientBreakdown.length === 0) && (
                 <Box sx={{ 
                   mb: 1, 
                   backgroundColor: '#f8f9fa',
@@ -4595,8 +4613,9 @@ return employeesWithData.length > 0 && (
                               });
                               if (dailyTotals.length > 0) {
                                 perDiemAmount = dailyTotals.reduce((sum, val) => sum + val, 0);
+                                const clientName = clients.find(c => c.id === relationship.clientId)?.name || relationship.clientName;
                                 breakdownItems.push({
-                                  label: `${relationship.clientName} - Daily Breakdown`,
+                                  label: `${clientName} - Daily Breakdown`,
                                   value: `$${perDiemAmount.toFixed(2)} (${dailyTotals.length} days)`,
                                   type: 'perdiem'
                                 });
@@ -4604,8 +4623,9 @@ return employeesWithData.length > 0 && (
                             } else {
                               // Full amount mode
                               perDiemAmount = parseFloat((item.input as any)[`${relationshipId}_perdiemAmount`] || '0');
+                              const clientName = clients.find(c => c.id === relationship.clientId)?.name || relationship.clientName;
                               if (perDiemAmount > 0) breakdownItems.push({
-                                label: `${relationship.clientName} - Per Diem`,
+                                label: `${clientName} - Per Diem`,
                                 value: `$${perDiemAmount.toFixed(2)}`,
                                 type: 'perdiem'
                               });
@@ -4740,86 +4760,7 @@ return employeesWithData.length > 0 && (
                     );
                   })()}
                 </Box>
-
-                {/* Breakdown */}
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, fontSize: '0.875rem' }}>
-                  
-                  {item.perDiemTotal > 0 && (
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span>Per Diem Total:</span>
-                      <span>${item.perDiemTotal.toFixed(2)}</span>
-                    </Box>
-                  )}
-                  
-                  {/* Show individual fields if they have values */}
-                  {item.input.hours && parseFloat(item.input.hours) > 0 && (
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', ml: 2 }}>
-                      <span>• Hours: {item.input.hours}</span>
-                      <span>${(parseFloat(item.input.hours) * (item.employee.payRate || 0)).toFixed(2)}</span>
-                    </Box>
-                  )}
-                  {item.input.otHours && parseFloat(item.input.otHours) > 0 && (
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', ml: 2 }}>
-                      <span>• OT Hours: {item.input.otHours}</span>
-                      <span>${(parseFloat(item.input.otHours) * (item.employee.payRate || 0) * 1.5).toFixed(2)}</span>
-                    </Box>
-                  )}
-                  {item.input.holidayHours && parseFloat(item.input.holidayHours) > 0 && (
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', ml: 2 }}>
-                      <span>• Holiday Hours: {item.input.holidayHours}</span>
-                      <span>${(parseFloat(item.input.holidayHours) * (item.employee.payRate || 0) * 2).toFixed(2)}</span>
-                    </Box>
-                  )}
-                  
-                  {/* Per diem breakdown */}
-                  {item.input.perdiemBreakdown && (
-                    <>
-                      {item.input.perdiemMonday && parseFloat(item.input.perdiemMonday) > 0 && (
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', ml: 2 }}>
-                          <span>• Monday: ${parseFloat(item.input.perdiemMonday).toFixed(2)}</span>
-                        </Box>
-                      )}
-                      {item.input.perdiemTuesday && parseFloat(item.input.perdiemTuesday) > 0 && (
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', ml: 2 }}>
-                          <span>• Tuesday: ${parseFloat(item.input.perdiemTuesday).toFixed(2)}</span>
-                        </Box>
-                      )}
-                      {item.input.perdiemWednesday && parseFloat(item.input.perdiemWednesday) > 0 && (
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', ml: 2 }}>
-                          <span>• Wednesday: ${parseFloat(item.input.perdiemWednesday).toFixed(2)}</span>
-                        </Box>
-                      )}
-                      {item.input.perdiemThursday && parseFloat(item.input.perdiemThursday) > 0 && (
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', ml: 2 }}>
-                          <span>• Thursday: ${parseFloat(item.input.perdiemThursday).toFixed(2)}</span>
-                        </Box>
-                      )}
-                      {item.input.perdiemFriday && parseFloat(item.input.perdiemFriday) > 0 && (
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', ml: 2 }}>
-                          <span>• Friday: ${parseFloat(item.input.perdiemFriday).toFixed(2)}</span>
-                        </Box>
-                      )}
-                      {item.input.perdiemSaturday && parseFloat(item.input.perdiemSaturday) > 0 && (
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', ml: 2 }}>
-                          <span>• Saturday: ${parseFloat(item.input.perdiemSaturday).toFixed(2)}</span>
-                        </Box>
-                      )}
-                      {item.input.perdiemSunday && parseFloat(item.input.perdiemSunday) > 0 && (
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', ml: 2 }}>
-                          <span>• Sunday: ${parseFloat(item.input.perdiemSunday).toFixed(2)}</span>
-                        </Box>
-          )}
-        </>
-                  )}
-                  
-                  {item.input.memo && (
-                    <Box sx={{ mt: 1, p: 1, bgcolor: '#f5f5f5', borderRadius: 1 }}>
-                      <Typography variant="body2" fontStyle="italic">
-                        Memo: {item.input.memo}
-                      </Typography>
-                    </Box>
-                  )}
-                </Box>
+                )}
               </Paper>
             ))}
           </Box>
@@ -4960,3 +4901,4 @@ return employeesWithData.length > 0 && (
 };
 
 export default BatchChecks;
+

@@ -79,7 +79,11 @@ interface Company {
   name: string;
 }
 
-const BankPage: React.FC = () => {
+interface BankPageProps {
+  currentRole: string;
+}
+
+const BankPage: React.FC<BankPageProps> = ({ currentRole }) => {
   console.log('🚀 BankPage component is rendering!');
   
   const [banks, setBanks] = useState<Bank[]>([]);
@@ -433,7 +437,8 @@ const BankPage: React.FC = () => {
           </Box>
         </Box>
 
-        {/* Add Bank Button */}
+        {/* Add Bank Button (Admin Only) */}
+        {currentRole === 'admin' && (
         <Button
           variant="contained"
           color="primary"
@@ -452,6 +457,7 @@ const BankPage: React.FC = () => {
         >
           + ADD BANK
         </Button>
+        )}
       </Box>
 
       {/* Banks Grid */}
@@ -462,8 +468,11 @@ const BankPage: React.FC = () => {
             No Banks Found
           </Typography>
           <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
-            Get started by adding your first bank account
+            {currentRole === 'admin' 
+              ? 'Get started by adding your first bank account'
+              : 'No bank accounts configured yet'}
           </Typography>
+          {currentRole === 'admin' && (
           <Button
             variant="contained"
             color="primary"
@@ -473,6 +482,7 @@ const BankPage: React.FC = () => {
           >
             Add Your First Bank
           </Button>
+          )}
         </Paper>
       ) : (
         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
@@ -560,6 +570,7 @@ const BankPage: React.FC = () => {
                         </IconButton>
                       </Tooltip>
                       
+                      {currentRole === 'admin' && (
                       <Tooltip title="Delete Bank">
                         <IconButton 
                           size="small" 
@@ -572,6 +583,7 @@ const BankPage: React.FC = () => {
                           <Delete />
                         </IconButton>
                       </Tooltip>
+                      )}
                     </Box>
 
                     {/* Digital Signature Preview */}
@@ -875,7 +887,7 @@ const BankPage: React.FC = () => {
                             </TableCell>
                             <TableCell>
                               <Typography variant="body2">
-                                {check.date?.toDate ? check.date.toDate().toLocaleDateString() : 'N/A'}
+                                {check.date ? new Date(check.date).toLocaleDateString() : 'N/A'}
                               </Typography>
                             </TableCell>
                             <TableCell>
@@ -897,7 +909,7 @@ const BankPage: React.FC = () => {
           )}
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
-          {selectedBank && (
+          {selectedBank && currentRole === 'admin' && (
             <Button 
               color="error" 
               variant="outlined"

@@ -67,9 +67,11 @@ interface Company {
 
 interface ClientsProps {
   companyIds: string[];
+  currentRole: string;
+  visibleClientIds: string[]; // IDs of clients this user can see
 }
 
-const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
+const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClientIds }) => {
   const [clients, setClients] = useState<Client[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [filter, setFilter] = useState("Active");
@@ -79,6 +81,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
   const [openForm, setOpenForm] = useState(false);
   const [openDetails, setOpenDetails] = useState(false);
   const [selectedClient, setSelectedClient] = useState<Client | null>(null);
+  const [isEditingDetails, setIsEditingDetails] = useState(false);
 
   const [formData, setFormData] = useState({
     name: "",
@@ -133,18 +136,33 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
 
   const handleSaveChanges = async () => {
     if (!selectedClient) return;
-    await updateDoc(doc(db, "clients", selectedClient.id), {
-      companyId: selectedClient.companyIds || [],
-      division: selectedClient.division || null,
-    });
-    setClients((prev) =>
-      prev.map((c) =>
-        c.id === selectedClient.id
-          ? { ...c, companyIds: selectedClient.companyIds || [], division: selectedClient.division }
-          : c
-      )
-    );
-    setOpenDetails(false);
+    
+    try {
+      // Update all client fields in Firestore
+      await updateDoc(doc(db, "clients", selectedClient.id), {
+        name: selectedClient.name,
+        address: selectedClient.address || null,
+        contactPerson: selectedClient.contactPerson || null,
+        contactEmail: selectedClient.contactEmail || null,
+        contactPhone: selectedClient.contactPhone || null,
+        companyId: selectedClient.companyIds || [],
+        division: selectedClient.division || null,
+      });
+      
+      // Update local state
+      setClients((prev) =>
+        prev.map((c) =>
+          c.id === selectedClient.id ? selectedClient : c
+        )
+      );
+      
+      // Exit edit mode and show success notification
+      setIsEditingDetails(false);
+      showNotification('Client updated successfully!', 'success');
+    } catch (error) {
+      console.error('Error updating client:', error);
+      showNotification('Error updating client. Please try again.', 'error');
+    }
   };
 
   const handleToggleActive = async (clientId: string, active: boolean) => {
@@ -229,7 +247,16 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
     setOpenDetails(true);
   };
 
-  const displayedClients = clients
+  // 🔒 SECURITY: Filter clients by visibleClientIds (for stats and display)
+  const visibleClients = clients.filter((c) => {
+    // Admins see all clients, managers/users only see their assigned clients
+    if (currentRole !== 'admin' && visibleClientIds.length > 0) {
+      return visibleClientIds.includes(c.id);
+    }
+    return true; // Admin sees all
+  });
+
+  const displayedClients = visibleClients
     .filter((c) => {
       // Apply company filter
       if (selectedCompanyId !== "all") {
@@ -309,6 +336,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
           </Box>
 
           <Box sx={{ ml: 'auto' }}>
+            {currentRole === 'admin' && (
             <Button
               variant="contained"
               onClick={handleOpenForm}
@@ -329,6 +357,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
             >
               Create Department
             </Button>
+            )}
           </Box>
         </Box>
       </Paper>
@@ -364,7 +393,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
           
           <Paper elevation={2} sx={{ p: 3, borderRadius: 3, textAlign: 'center', minWidth: 200, flex: 1 }}>
             <Typography variant="h4" fontWeight="bold" color="success.main">
-              {clients.filter(c => c.active).length}
+              {visibleClients.filter(c => c.active).length}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               Active Departments
@@ -372,7 +401,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
           </Paper>
           <Paper elevation={2} sx={{ p: 3, borderRadius: 3, textAlign: 'center', minWidth: 200, flex: 1 }}>
             <Typography variant="h4" fontWeight="bold" color="error.main">
-              {clients.filter(c => !c.active).length}
+              {visibleClients.filter(c => !c.active).length}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               Inactive Departments
@@ -380,7 +409,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
           </Paper>
           <Paper elevation={2} sx={{ p: 3, borderRadius: 3, textAlign: 'center', minWidth: 200, flex: 1 }}>
             <Typography variant="h4" fontWeight="bold" color="info.main">
-              {clients.filter(c => c.companyIds && c.companyIds.length > 0).length}
+              {visibleClients.filter(c => c.companyIds && c.companyIds.length > 0).length}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               Linked to Companies
@@ -404,7 +433,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
                   transform: 'translateY(-8px)',
                   boxShadow: 8,
                 },
-                border: client.active ? '2px solid #4caf50' : '2px solid #f44336',
+                border: client.active ? '2px solid #2e7d32' : '2px solid #f44336',
               }}
               onClick={() => handleOpenDetails(client)}
             >
@@ -429,24 +458,24 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
                   />
                 </Box>
 
-                {/* Client Name */}
-                <Typography variant="h6" fontWeight="bold" gutterBottom sx={{ color: '#1976d2' }}>
-                  {client.name}
-                </Typography>
-
-                {/* Division */}
+                {/* Division (Client) - Now on top */}
                 {client.division && (
                   <Typography 
-                    variant="body2" 
+                    variant="body1" 
                     sx={{ 
-                      mb: 2, 
-                      fontStyle: 'italic',
-                      color: '#4caf50'
+                      mb: 1, 
+                      fontWeight: 'bold',
+                      color: '#2e7d32'
                     }}
                   >
                     Client: {client.division}
                   </Typography>
                 )}
+
+                {/* Department Name - Now below in blue */}
+                <Typography variant="h6" fontWeight="bold" gutterBottom sx={{ color: '#1976d2' }}>
+                  {client.name}
+                </Typography>
 
                 {/* Company Status */}
                 <Box sx={{ mb: 2 }}>
@@ -552,7 +581,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
                       variant="body2" 
                       sx={{ 
                         fontWeight: 'bold',
-                        color: client.active ? '#4caf50' : '#f44336',
+                        color: client.active ? '#2e7d32' : '#f44336',
                         userSelect: 'none'
                       }}
                     >
@@ -610,7 +639,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
               : `No ${filter.toLowerCase()} clients found`
             }
           </Typography>
-          {filter === "All" && (
+          {filter === "All" && currentRole === 'admin' && (
             <Button
               variant="contained"
               onClick={handleOpenForm}
@@ -752,7 +781,10 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
       {/* Floating details dialog */}
       <Dialog
         open={openDetails}
-        onClose={() => setOpenDetails(false)}
+        onClose={() => {
+          setOpenDetails(false);
+          setIsEditingDetails(false);
+        }}
         maxWidth="md"
         fullWidth
       >
@@ -766,33 +798,117 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
           {selectedClient && (
             <Card sx={{ mb: 3, p: 2, backgroundColor: "#f9f9f9" }}>
               <CardContent>
-                <Typography variant="h6" gutterBottom>
-                  Client Info
-                </Typography>
-                <Divider sx={{ mb: 1 }} />
-                <Typography>Name: {selectedClient.name}</Typography>
-                <Typography>Address: {selectedClient.address || "N/A"}</Typography>
-                <Typography>
-                  Client: {selectedClient.division || "N/A"}
-                </Typography>
-                <Typography>
-                  Contact Person: {selectedClient.contactPerson || "N/A"}
-                </Typography>
-                <Typography>
-                  Email: {selectedClient.contactEmail || "N/A"}
-                </Typography>
-                <Typography>
-                  Phone: {selectedClient.contactPhone || "N/A"}
-                </Typography>
-                <Typography>
-                  Status:{" "}
-                  <Chip
-                    icon={getStatusIcon(selectedClient.active)}
-                    label={selectedClient.active ? "Active" : "Inactive"}
-                    color={getStatusColor(selectedClient.active)}
-                    size="small"
-                  />
-                </Typography>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                  <Typography variant="h6">
+                    Client Info
+                  </Typography>
+                  {currentRole === 'admin' && !isEditingDetails && (
+                    <Button
+                      startIcon={<Edit />}
+                      size="small"
+                      onClick={() => setIsEditingDetails(true)}
+                      sx={{ borderRadius: 2 }}
+                    >
+                      Edit
+                    </Button>
+                  )}
+                  {currentRole === 'admin' && isEditingDetails && (
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        setIsEditingDetails(false);
+                        // Reset to original values if needed
+                      }}
+                      sx={{ borderRadius: 2 }}
+                    >
+                      Cancel
+                    </Button>
+                  )}
+                </Box>
+                <Divider sx={{ mb: 2 }} />
+                
+                {!isEditingDetails ? (
+                  // Read-only view
+                  <>
+                    <Typography sx={{ mb: 1 }}>Name: {selectedClient.name}</Typography>
+                    <Typography sx={{ mb: 1 }}>Address: {selectedClient.address || "N/A"}</Typography>
+                    <Typography sx={{ mb: 1 }}>
+                      Client: {selectedClient.division || "N/A"}
+                    </Typography>
+                    <Typography sx={{ mb: 1 }}>
+                      Contact Person: {selectedClient.contactPerson || "N/A"}
+                    </Typography>
+                    <Typography sx={{ mb: 1 }}>
+                      Email: {selectedClient.contactEmail || "N/A"}
+                    </Typography>
+                    <Typography sx={{ mb: 1 }}>
+                      Phone: {selectedClient.contactPhone || "N/A"}
+                    </Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <Typography>Status:</Typography>
+                      <Chip
+                        icon={getStatusIcon(selectedClient.active)}
+                        label={selectedClient.active ? "Active" : "Inactive"}
+                        color={getStatusColor(selectedClient.active)}
+                        size="small"
+                      />
+                    </Box>
+                  </>
+                ) : (
+                  // Edit mode (admin only)
+                  <>
+                    <TextField
+                      fullWidth
+                      label="Name"
+                      value={selectedClient.name}
+                      onChange={(e) => setSelectedClient({ ...selectedClient, name: e.target.value })}
+                      sx={{ mb: 2 }}
+                      variant="outlined"
+                    />
+                    <TextField
+                      fullWidth
+                      label="Address"
+                      value={selectedClient.address || ""}
+                      onChange={(e) => setSelectedClient({ ...selectedClient, address: e.target.value })}
+                      sx={{ mb: 2 }}
+                      variant="outlined"
+                    />
+                    <TextField
+                      fullWidth
+                      label="Contact Person"
+                      value={selectedClient.contactPerson || ""}
+                      onChange={(e) => setSelectedClient({ ...selectedClient, contactPerson: e.target.value })}
+                      sx={{ mb: 2 }}
+                      variant="outlined"
+                    />
+                    <TextField
+                      fullWidth
+                      label="Email"
+                      type="email"
+                      value={selectedClient.contactEmail || ""}
+                      onChange={(e) => setSelectedClient({ ...selectedClient, contactEmail: e.target.value })}
+                      sx={{ mb: 2 }}
+                      variant="outlined"
+                    />
+                    <TextField
+                      fullWidth
+                      label="Phone"
+                      value={selectedClient.contactPhone || ""}
+                      onChange={(e) => setSelectedClient({ ...selectedClient, contactPhone: e.target.value })}
+                      sx={{ mb: 2 }}
+                      variant="outlined"
+                    />
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <Typography>Status:</Typography>
+                      <Chip
+                        icon={getStatusIcon(selectedClient.active)}
+                        label={selectedClient.active ? "Active" : "Inactive"}
+                        color={getStatusColor(selectedClient.active)}
+                        size="small"
+                      />
+                    </Box>
+                  </>
+                )}
               </CardContent>
             </Card>
           )}
@@ -889,19 +1005,24 @@ const Clients: React.FC<ClientsProps> = ({ companyIds }) => {
         </DialogContent>
         <DialogActions sx={{ p: 3 }}>
           <Button 
-            onClick={() => setOpenDetails(false)}
+            onClick={() => {
+              setOpenDetails(false);
+              setIsEditingDetails(false);
+            }}
             sx={{ borderRadius: 2, px: 3 }}
           >
             Close
           </Button>
-          <Button 
-            variant="contained" 
-            color="primary" 
-            onClick={handleSaveChanges}
-            sx={{ borderRadius: 2, px: 3 }}
-          >
-            Save Changes
-          </Button>
+          {(isEditingDetails || currentRole === 'admin') && (
+            <Button 
+              variant="contained" 
+              color="primary" 
+              onClick={handleSaveChanges}
+              sx={{ borderRadius: 2, px: 3 }}
+            >
+              Save Changes
+            </Button>
+          )}
         </DialogActions>
       </Dialog>
 

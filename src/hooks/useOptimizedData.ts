@@ -38,6 +38,7 @@ export function useOptimizedData<T>(
         // Handle large 'companyId in [...]' filters
         if (
           options.userRole !== 'admin' &&
+          options.userRole !== 'manager' &&
           Array.isArray(filters.companyId) &&
           filters.companyId.length > 10
         ) {
@@ -67,17 +68,17 @@ export function useOptimizedData<T>(
               Promise.all(chunks.map(c => getDocs(query(collection(db, collectionName), where('companyId', 'in', c)))))
                 .then(snapshots => {
                   const mergedDocs = snapshots.flatMap(snap =>
-                    snap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) }))
-                  );
-                  
+            snap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) }))
+          );
+
                   console.log('[useOptimizedData] allDocs after chunking:', mergedDocs);
-                  
-                  if (collectionName === 'companies') {
+          
+          if (collectionName === 'companies') {
                     mergedDocs.forEach(company => {
-                      console.log(`[useOptimizedData] Chunked company ${company.id} data:`, company);
-                      console.log(`[useOptimizedData] Chunked company ${company.id} divisions field:`, company.divisions);
-                    });
-                  }
+              console.log(`[useOptimizedData] Chunked company ${company.id} data:`, company);
+              console.log(`[useOptimizedData] Chunked company ${company.id} divisions field:`, company.divisions);
+            });
+          }
                   
                   if (isMounted) {
                     setData(mergedDocs as T[]);
@@ -142,10 +143,10 @@ export function useOptimizedData<T>(
               }))
                 .then(snapshots => {
                   const allDocs = snapshots.flatMap(snap => snap.docs);
-                  const uniqueDocs = Array.from(new Map(allDocs.map(doc => [doc.id, doc])).values());
-                  const result = uniqueDocs.map(doc => ({ id: doc.id, ...(doc.data() as any) }));
+          const uniqueDocs = Array.from(new Map(allDocs.map(doc => [doc.id, doc])).values());
+          const result = uniqueDocs.map(doc => ({ id: doc.id, ...(doc.data() as any) }));
 
-                  console.log('[useOptimizedData] allDocs after generic chunking:', result);
+          console.log('[useOptimizedData] allDocs after generic chunking:', result);
                   if (isMounted) {
                     setData(result as T[]);
                     setLoading(false);
@@ -172,15 +173,15 @@ export function useOptimizedData<T>(
         unsubscribe = onSnapshot(q, (snapshot: QuerySnapshot<DocumentData>) => {
           console.log('[useOptimizedData] real-time listener update:', snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) })));
           
-          if (collectionName === 'companies') {
-            snapshot.docs.forEach(doc => {
-              const data = doc.data() as any;
-              console.log(`[useOptimizedData] Company ${doc.id} raw data:`, data);
-              console.log(`[useOptimizedData] Company ${doc.id} divisions field:`, data.divisions);
-            });
-          }
-          
-          const result = snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) })) as T[];
+        if (collectionName === 'companies') {
+          snapshot.docs.forEach(doc => {
+            const data = doc.data() as any;
+            console.log(`[useOptimizedData] Company ${doc.id} raw data:`, data);
+            console.log(`[useOptimizedData] Company ${doc.id} divisions field:`, data.divisions);
+          });
+        }
+        
+        const result = snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) })) as T[];
 
           if (isMounted) {
             setData(result);

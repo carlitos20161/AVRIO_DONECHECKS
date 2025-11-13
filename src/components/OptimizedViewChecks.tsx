@@ -50,6 +50,7 @@ import { db } from '../firebase';
 import { usePrintPermissions } from '../hooks/usePrintPermissions'; // ✅ Import the print permissions hook
 import { decryptData } from '../utils/encryption';  // Import decryptData function
 import Notifications from './Notifications';
+import { getApiUrl } from '../config';
 
 
 // Function to calculate ISO week number
@@ -61,30 +62,41 @@ const getWeekNumber = (date: Date): number => {
   return Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7) + 1;
 };
 
+const formatDateKey = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const getStartOfWeek = (date: Date) => {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return d;
+};
+
 // Week key calculation functions
 // All functions return the Monday of the respective week in YYYY-MM-DD format
 
 // Get current week key (Monday of current week)
 const getCurrentWeekKey = () => {
-  const now = new Date();
-  const d = new Date(now);
-  return new Date(d.setDate(d.getDate() - d.getDay())).toISOString().slice(0, 10);
+  return formatDateKey(getStartOfWeek(new Date()));
 };
 
 // Get next week key (Monday of next week)
 const getNextWeekKey = () => {
-  const now = new Date();
-  const d = new Date(now);
-  const nextWeek = new Date(d.setDate(d.getDate() - d.getDay() + 7));
-  return nextWeek.toISOString().slice(0, 10);
+  const start = getStartOfWeek(new Date());
+  start.setDate(start.getDate() + 7);
+  return formatDateKey(start);
 };
 
 // Get past week key (Monday of previous week)
 const getPastWeekKey = () => {
-  const now = new Date();
-  const d = new Date(now);
-  const pastWeek = new Date(d.setDate(d.getDate() - d.getDay() - 7));
-  return pastWeek.toISOString().slice(0, 10);
+  const start = getStartOfWeek(new Date());
+  start.setDate(start.getDate() - 7);
+  return formatDateKey(start);
 };
 
 // Get available years from weekKeys
@@ -189,9 +201,10 @@ interface ChecksProps {
   refetchChecks: () => void;
   currentRole: string;
   companyIds: string[];
+  visibleClientIds: string[]; // IDs of clients this user can see
 }
 
-const OptimizedViewChecks: React.FC<ChecksProps> = ({ filter, onClearFilter, users, companies, banks, checks, usersLoading, companiesLoading, banksLoading, checksLoading, onReviewUpdated, refetchChecks, currentRole, companyIds }) => {
+const OptimizedViewChecks: React.FC<ChecksProps> = ({ filter, onClearFilter, users, companies, banks, checks, usersLoading, companiesLoading, banksLoading, checksLoading, onReviewUpdated, refetchChecks, currentRole, companyIds, visibleClientIds }) => {
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [selectedWeekKey, setSelectedWeekKey] = useState<string | null>(null);
   const [selectedCreatedBy, setSelectedCreatedBy] = useState<string | null>(null);
@@ -1346,6 +1359,29 @@ const [userLoaded, setUserLoaded] = useState(false);
       ? checks  // Admin sees all checks
       : checks.filter((c: any) => companyIds.includes(c.companyId));  // Users see only their company checks
     
+    // 🔒 SECURITY: Filter by visibleClientIds (only show checks for clients user has access to)
+    // Admins see all clients, managers/users only see their assigned clients
+    if (currentRole !== 'admin' && visibleClientIds.length > 0) {
+      allowedChecks = allowedChecks.filter((c: any) => {
+        // Check if check's client is in visible clients
+        if (c.clientId && visibleClientIds.includes(c.clientId)) {
+          return true;
+        }
+        // Also check relationship details for multi-client checks
+        if (c.relationshipDetails && c.relationshipDetails.length > 0) {
+          return c.relationshipDetails.some((rel: any) => 
+            rel.clientId && visibleClientIds.includes(rel.clientId)
+          );
+        }
+        return false;
+      });
+      console.log('🔒 [ViewChecks Security] Filtered checks by visibleClientIds:', {
+        originalCount: checks.length,
+        afterCompanyFilter: allowedChecks.length,
+        visibleClientIds
+      });
+    }
+    
     console.log('[DEBUG] Filtering - currentRole:', currentRole);
     console.log('[DEBUG] Filtering - companyIds:', companyIds);
     console.log('[DEBUG] Filtering - allowedChecks.length:', allowedChecks.length);
@@ -1360,9 +1396,7 @@ const [userLoaded, setUserLoaded] = useState(false);
     if (selectedWeekKey) {
       filtered = filtered.filter((c: any) => {
         const dateObj = c.date?.toDate ? c.date.toDate() : new Date(c.date);
-        // Inline week key calculation
-        const d = new Date(dateObj);
-        const weekKey = new Date(d.setDate(d.getDate() - d.getDay())).toISOString().slice(0, 10);
+        const weekKey = formatDateKey(getStartOfWeek(dateObj));
         return weekKey === selectedWeekKey;
       });
     }
@@ -1394,16 +1428,14 @@ const [userLoaded, setUserLoaded] = useState(false);
       filtered = filtered.filter((c: any) => c.reviewed === false);
     }
     return filtered.sort((a, b) => (b.checkNumber || 0) - (a.checkNumber || 0));
-  }, [selectedCompanyId, checks, selectedWeekKey, selectedCreatedBy, selectedClientId, debouncedSearchText, userMap, checksLoading, reviewOnly, companyIds, currentRole]);
+  }, [selectedCompanyId, checks, selectedWeekKey, selectedCreatedBy, selectedClientId, debouncedSearchText, userMap, checksLoading, reviewOnly, companyIds, currentRole, visibleClientIds]);
 
   // Memoized checks by week
   const checksByWeek = useMemo(() => {
     const grouped: { [week: string]: CheckItem[] } = {};
     filteredChecks.forEach(c => {
       const dateObj = c.date?.toDate ? c.date.toDate() : new Date(c.date);
-      // Inline week key calculation
-      const d = new Date(dateObj);
-      const key = new Date(d.setDate(d.getDate() - d.getDay())).toISOString().slice(0, 10);
+      const key = formatDateKey(getStartOfWeek(dateObj));
       if (!grouped[key]) grouped[key] = [];
       grouped[key].push(c);
     });
@@ -1443,9 +1475,10 @@ const [userLoaded, setUserLoaded] = useState(false);
   const handlePrintWeek = async (companyId: string | null, weekKey: string | null) => {
     if (!companyId || !weekKey) return;
     try {
-      const response = await fetch(
-        `http://10.0.0.118:5004/api/print_week?companyId=${companyId}&weekKey=${weekKey}`
+      const printWeekUrl = getApiUrl(
+        `/api/print_week?companyId=${companyId}&weekKey=${weekKey}`
       );
+      const response = await fetch(printWeekUrl);
       if (!response.ok) {
         alert('Error fetching PDF.');
         return;
@@ -1551,10 +1584,11 @@ const [userLoaded, setUserLoaded] = useState(false);
         createdByUsername: createdByUsername  // Add this line
       };
       
-      console.log('🔍 Sending request to:', 'http://10.0.0.118:5004/api/print_selected_checks');
+      const printSelectedUrl = getApiUrl('/api/print_selected_checks');
+      console.log('🔍 Sending request to:', printSelectedUrl);
       console.log('🔍 Request body:', requestBody);
       
-      const response = await fetch('http://10.0.0.118:5004/api/print_selected_checks', {
+      const response = await fetch(printSelectedUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
@@ -1682,7 +1716,8 @@ const [userLoaded, setUserLoaded] = useState(false);
       }
       
       try {
-        console.log('🔍 Sending request to:', 'http://10.0.0.118:5004/api/print_selected_checks');
+        const printSelectedUrl = getApiUrl('/api/print_selected_checks');
+        console.log('🔍 Sending request to:', printSelectedUrl);
         console.log('🔍 Request body:', { 
           checkIds: selectedChecksList, 
           weekKey: selectedWeekKey,
@@ -1731,7 +1766,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
         
         console.log('🔍 About to send fetch request...');
-        const response = await fetch('http://10.0.0.118:5004/api/print_selected_checks', {
+        const response = await fetch(printSelectedUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(requestBody),
@@ -1959,100 +1994,115 @@ const [userLoaded, setUserLoaded] = useState(false);
             p: 1
           }}>
             {(() => {
-              // Get filtered weeks based on selection
               let filteredWeeks: string[] = [];
-              
+
               if (selectedWeekFilter === 'past') {
-                // Default view: Show current week, previous week, and next week
-                const previousWeek = getPastWeekKey();
-                const currentWeek = getCurrentWeekKey();
-                const nextWeek = getNextWeekKey();
-                filteredWeeks = [previousWeek, currentWeek, nextWeek];
-                
-                console.log('[DEBUG] Default view - showing previous, current, next week:', filteredWeeks);
+                const baseWeekDate = getStartOfWeek(new Date());
+                const candidateWeeks: string[] = [];
+
+                for (let offset = -2; offset <= 2; offset += 1) {
+                  const weekDate = new Date(baseWeekDate);
+                  weekDate.setDate(baseWeekDate.getDate() + offset * 7);
+                  candidateWeeks.push(formatDateKey(weekDate));
+                }
+
+                filteredWeeks = candidateWeeks
+                  .filter(weekKey => {
+                    const weekChecks = checksByWeek[weekKey] || [];
+                    const companyChecks = selectedCompanyId
+                      ? weekChecks.filter((c: any) => c.companyId === selectedCompanyId)
+                      : weekChecks;
+                    return companyChecks.length > 0;
+                  })
+                  .sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
+
+                console.log('[DEBUG] Default view - showing weeks around current week with checks:', filteredWeeks);
               } else if (selectedWeekFilter === 'all') {
-                // All Weeks - show only weeks that have checks (current year)
                 const currentYear = new Date().getFullYear().toString();
-                filteredWeeks = weekKeys.filter(weekKey => 
+                filteredWeeks = weekKeys.filter(weekKey =>
                   new Date(weekKey).getFullYear().toString() === currentYear
                 );
               } else if (selectedWeekFilter === 'year') {
-                // Year - show ALL weeks in selected year (not just weeks with checks)
-                // Generate all weeks for the selected year
                 const allWeeksInYear: string[] = [];
-                const startDate = new Date(selectedYear + '-01-01');
-                const endDate = new Date(selectedYear + '-12-31');
-                
-                // Find the first Monday of the year
-                let currentDate = new Date(startDate);
-                while (currentDate.getDay() !== 1) {
-                  currentDate.setDate(currentDate.getDate() + 1);
-                }
-                
-                // Generate all Monday dates for the year
+                const startDate = new Date(`${selectedYear}-01-01`);
+                const endDate = new Date(`${selectedYear}-12-31`);
+
+                let currentDate = getStartOfWeek(startDate);
+
                 while (currentDate <= endDate) {
-                  allWeeksInYear.push(currentDate.toISOString().split('T')[0]);
+                  allWeeksInYear.push(formatDateKey(currentDate));
                   currentDate.setDate(currentDate.getDate() + 7);
                 }
-                
+
                 filteredWeeks = allWeeksInYear;
               }
 
               console.log('[DEBUG] Final filteredWeeks:', filteredWeeks);
-              return filteredWeeks;
-            })()
-              .map((weekKey, index) => {
-              console.log('[DEBUG] Rendering week:', weekKey, 'index:', index);
-              const weekDate = new Date(weekKey);
-              const weekEndDate = new Date(weekDate);
-              weekEndDate.setDate(weekDate.getDate() + 6);
-              
-              // For "All Weeks" view, only show checks for the selected company
-              const weekChecks = checksByWeek[weekKey] || [];
-              const companyChecks = selectedCompanyId ? 
-                weekChecks.filter((c: any) => c.companyId === selectedCompanyId) : 
-                weekChecks;
-              
-              const checkCount = companyChecks.length;
-              const pendingReview = companyChecks.filter((c: any) => !c.reviewed).length;
-              const isCurrentWeek = weekKey === getCurrentWeekKey();
-              const isNextWeek = weekKey === getNextWeekKey();
-              const isPastWeek = weekKey === getPastWeekKey();
-              const isSpecialWeek = isCurrentWeek || isNextWeek || isPastWeek;
-              
-              return (
-                <Box
-                  key={weekKey}
-                  sx={{
-                    border: '2px solid',
-                    borderColor: isSpecialWeek ? 'primary.main' : 'grey.200',
-                    borderRadius: 2,
-                    p: 2,
-                    cursor: 'pointer',
-                    transition: 'all 0.2s ease',
-                    backgroundColor: isSpecialWeek ? 'primary.50' : 'white',
-                    '&:hover': {
-                      borderColor: 'primary.main',
-                      backgroundColor: 'primary.50',
-                      transform: 'translateY(-1px)',
-                      boxShadow: 2
-                    },
-                    position: 'relative'
-                  }}
-                onClick={() => {
-                    console.log('[ACTION] Week button clicked', weekKey);
-                    setSelectedWeekKey(weekKey);
-                  setIsSelectingWeek(false);
-                }}
-                >
-                  {/* Week Date Range */}
-                  <Typography variant="h6" sx={{ fontWeight: 'bold', mb: 1 }}>
-                    Week {getWeekNumber(weekDate)} - Week of {weekDate.toLocaleDateString('en-US', { 
-                      month: 'short', 
-                      day: 'numeric',
-                      year: 'numeric'
-                    })}
-                  </Typography>
+
+              if (filteredWeeks.length === 0) {
+                return (
+                  <Box key="no-weeks" sx={{ gridColumn: '1 / -1' }}>
+                    <Alert severity="info">
+                      No checks were found for the current week, the previous two weeks, or the next two weeks.
+                      Try switching the Week View to “All” to see older checks.
+                    </Alert>
+                  </Box>
+                );
+              }
+
+              return filteredWeeks.map((weekKey, index) => {
+                console.log('[DEBUG] Rendering week:', weekKey, 'index:', index);
+                const weekDate = new Date(weekKey);
+                const weekEndDate = new Date(weekDate);
+                weekEndDate.setDate(weekDate.getDate() + 6);
+
+                // For "All Weeks" view, only show checks for the selected company
+                const weekChecks = checksByWeek[weekKey] || [];
+                const companyChecks = selectedCompanyId
+                  ? weekChecks.filter((c: any) => c.companyId === selectedCompanyId)
+                  : weekChecks;
+
+                const checkCount = companyChecks.length;
+                const pendingReview = companyChecks.filter((c: any) => !c.reviewed).length;
+                const isCurrentWeek = weekKey === getCurrentWeekKey();
+                const isNextWeek = weekKey === getNextWeekKey();
+                const isPastWeek = weekKey === getPastWeekKey();
+                const isSpecialWeek = isCurrentWeek || isNextWeek || isPastWeek;
+
+                return (
+                  <Box
+                    key={weekKey}
+                    sx={{
+                      border: '2px solid',
+                      borderColor: isSpecialWeek ? 'primary.main' : 'grey.200',
+                      borderRadius: 2,
+                      p: 2,
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease',
+                      backgroundColor: isSpecialWeek ? 'primary.50' : 'white',
+                      '&:hover': {
+                        borderColor: 'primary.main',
+                        backgroundColor: 'primary.50',
+                        transform: 'translateY(-1px)',
+                        boxShadow: 2
+                      },
+                      position: 'relative'
+                    }}
+                    onClick={() => {
+                      console.log('[ACTION] Week button clicked', weekKey);
+                      setSelectedWeekKey(weekKey);
+                      setIsSelectingWeek(false);
+                    }}
+                  >
+                    {/* Week Date Range */}
+                    <Typography variant="h6" sx={{ fontWeight: 'bold', mb: 1 }}>
+                      Week {getWeekNumber(weekDate)} - Week of{' '}
+                      {weekDate.toLocaleDateString('en-US', {
+                        month: 'short',
+                        day: 'numeric',
+                        year: 'numeric'
+                      })}
+                    </Typography>
                   
                   {/* Date Range */}
                   <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
@@ -2114,7 +2164,8 @@ const [userLoaded, setUserLoaded] = useState(false);
                   </Typography>
                 </Box>
               );
-            })}
+            });
+          })()}
           </Box>
           
           {/* Quick Actions */}

@@ -71,7 +71,11 @@ interface User {
   visibleClientIds?: string[]; // ✅ New field for client visibility
 }
 
-const UsersPage: React.FC = () => {
+interface UsersPageProps {
+  currentRole: string;
+}
+
+const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
   const [users, setUsers] = useState<User[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
@@ -90,6 +94,7 @@ const UsersPage: React.FC = () => {
   const [openDetails, setOpenDetails] = useState(false);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [editPassword, setEditPassword] = useState("");
+  const [editRole, setEditRole] = useState<string>("user");
   const [editCompanies, setEditCompanies] = useState<string[]>([]);
   const [editActive, setEditActive] = useState(true);
   const [editCanPrintChecks, setEditCanPrintChecks] = useState(false); // ✅ New state for edit form
@@ -195,15 +200,15 @@ const UsersPage: React.FC = () => {
             clientBelongsToCompanies(client, editCompanies)
           ).map(client => client.id);
       
-          // Only update if the current selection doesn't match available clients
-          const currentSelection = editVisibleClients.filter(id => availableClients.includes(id));
-          if (currentSelection.length !== availableClients.length) {
+      // Only update if the current selection doesn't match available clients
+      const currentSelection = editVisibleClients.filter(id => availableClients.includes(id));
+      if (currentSelection.length !== availableClients.length) {
             console.log('🔍 DEBUG: Auto-selecting all clients because user has no saved visibility settings');
-            setEditVisibleClients(availableClients);
-          }
-        } else {
-          setEditVisibleClients([]);
-        }
+        setEditVisibleClients(availableClients);
+      }
+    } else {
+      setEditVisibleClients([]);
+    }
       } else {
         console.log('🔍 DEBUG: User has saved visibility settings, not auto-selecting');
         // If user has saved visibility settings, ensure we're showing their saved settings
@@ -242,7 +247,7 @@ const UsersPage: React.FC = () => {
         uid: cred.user.uid,
         email,
         username,
-        password, // ⚠️ for demo only; avoid storing plain text in production
+        // ✅ REMOVED password - Firebase Auth handles this securely
         role,
         active: true,
         companyIds,
@@ -277,6 +282,7 @@ const UsersPage: React.FC = () => {
   const handleOpenDetails = (user: User) => {
     setSelectedUser(user);
     setEditPassword(user.password);
+    setEditRole(user.role); // ✅ Set role state
     setEditCompanies(user.companyIds || []);
     setEditActive(user.active);
     setEditCanPrintChecks(user.canPrintChecks ?? false); // Set new state for edit
@@ -295,31 +301,41 @@ const UsersPage: React.FC = () => {
       comparison: JSON.stringify(editVisibleClients) !== JSON.stringify(selectedUser.visibleClientIds || [])
     });
     
+    // 🔒 SECURITY: Prevent managers from editing admin accounts
+    if (currentRole === 'manager' && selectedUser.role === 'admin') {
+      showNotification("❌ Managers cannot edit admin accounts", 'error');
+      return;
+    }
+    
     try {
-      // Only update fields that actually changed
-      const updates: any = {};
-      
-      if (editPassword !== selectedUser.password) {
-        // Only update password if it's not empty (user actually wants to change it)
-        if (editPassword && editPassword.trim() !== '') {
-          updates.password = editPassword;
-        }
+    // Only update fields that actually changed
+    const updates: any = {};
+    
+    if (editPassword !== selectedUser.password) {
+      // Only update password if it's not empty (user actually wants to change it)
+      if (editPassword && editPassword.trim() !== '') {
+        updates.password = editPassword;
       }
+    }
       
-      if (editActive !== selectedUser.active) {
-        updates.active = editActive;
+      if (editRole !== selectedUser.role) {
+        updates.role = editRole;
       }
-      
-      if (JSON.stringify(editCompanies) !== JSON.stringify(selectedUser.companyIds || [])) {
-        updates.companyIds = editCompanies;
-      }
-      
-      if (editCanPrintChecks !== selectedUser.canPrintChecks) {
-        updates.canPrintChecks = editCanPrintChecks;
-      }
-      
-      if (JSON.stringify(editVisibleClients) !== JSON.stringify(selectedUser.visibleClientIds || [])) {
-        updates.visibleClientIds = editVisibleClients;
+    
+    if (editActive !== selectedUser.active) {
+      updates.active = editActive;
+    }
+    
+    if (JSON.stringify(editCompanies) !== JSON.stringify(selectedUser.companyIds || [])) {
+      updates.companyIds = editCompanies;
+    }
+    
+    if (editCanPrintChecks !== selectedUser.canPrintChecks) {
+      updates.canPrintChecks = editCanPrintChecks;
+    }
+    
+    if (JSON.stringify(editVisibleClients) !== JSON.stringify(selectedUser.visibleClientIds || [])) {
+      updates.visibleClientIds = editVisibleClients;
         console.log('🔍 DEBUG: Updating visibleClientIds to:', editVisibleClients);
       }
       
@@ -329,16 +345,16 @@ const UsersPage: React.FC = () => {
       if (!updates.visibleClientIds) {
         updates.visibleClientIds = editVisibleClients;
         console.log('🔍 DEBUG: Force updating visibleClientIds to:', editVisibleClients);
-      }
-      
-      // Only update if there are actual changes
-      if (Object.keys(updates).length > 0) {
+    }
+    
+    // Only update if there are actual changes
+    if (Object.keys(updates).length > 0) {
         console.log('🔍 DEBUG: Saving to Firestore with updates:', updates);
-        await updateDoc(doc(db, "users", selectedUser.id), updates);
+      await updateDoc(doc(db, "users", selectedUser.id), updates);
         showNotification("✅ User updated successfully!", 'success');
-        setOpenDetails(false);
-        fetchAll();
-      } else {
+      setOpenDetails(false);
+      fetchAll();
+    } else {
         showNotification("No changes to save", 'warning');
       }
     } catch (err) {
@@ -349,10 +365,24 @@ const UsersPage: React.FC = () => {
 
   const handleDeleteUser = async () => {
     if (!selectedUser) return;
+    
+    // 🔒 SECURITY: Prevent managers from deleting admin accounts
+    if (currentRole === 'manager' && selectedUser.role === 'admin') {
+      showNotification("❌ Managers cannot delete admin accounts", 'error');
+      return;
+    }
+    
     if (!window.confirm("Are you sure you want to delete this user?")) return;
-    await deleteDoc(doc(db, "users", selectedUser.id));
-    setOpenDetails(false);
-    fetchAll();
+    
+    try {
+      await deleteDoc(doc(db, "users", selectedUser.id));
+      setOpenDetails(false);
+      fetchAll();
+      showNotification("✅ User deleted successfully", 'success');
+    } catch (err) {
+      console.error('❌ Error deleting user:', err);
+      showNotification("❌ Failed to delete user", 'error');
+    }
   };
 
   if (loading) return <Typography>Loading users...</Typography>;
@@ -568,7 +598,9 @@ const UsersPage: React.FC = () => {
               value={role}
               onChange={(e) => setRole(e.target.value)}
             >
-              <MenuItem value="admin">Admin</MenuItem>
+              {/* 🔒 Only admins can create other admin accounts */}
+              {currentRole === 'admin' && <MenuItem value="admin">Admin</MenuItem>}
+              <MenuItem value="manager">Manager</MenuItem>
               <MenuItem value="user">User</MenuItem>
             </Select>
           </FormControl>
@@ -645,17 +677,39 @@ const UsersPage: React.FC = () => {
         <DialogContent
           sx={{ display: "flex", flexDirection: "column", gap: 2 }}
         >
+          {/* 🔒 Show warning when manager views admin account */}
+          {currentRole === 'manager' && selectedUser?.role === 'admin' && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              ⚠️ You cannot edit or delete admin accounts. This account is read-only.
+            </Alert>
+          )}
           <Typography>Username: {selectedUser?.username}</Typography>
+          <FormControl fullWidth>
+            <InputLabel id="edit-role-label">Role</InputLabel>
+            <Select
+              labelId="edit-role-label"
+              value={editRole}
+              onChange={(e) => setEditRole(e.target.value)}
+              disabled={currentRole === 'manager' && selectedUser?.role === 'admin'}
+            >
+              {/* 🔒 Only admins can assign admin role */}
+              {currentRole === 'admin' && <MenuItem value="admin">Admin</MenuItem>}
+              <MenuItem value="manager">Manager</MenuItem>
+              <MenuItem value="user">User</MenuItem>
+            </Select>
+          </FormControl>
           <TextField
             label="Password"
             value={editPassword}
             onChange={(e) => setEditPassword(e.target.value)}
+            disabled={currentRole === 'manager' && selectedUser?.role === 'admin'}
           />
           <FormControlLabel
             control={
               <Switch
                 checked={editActive}
                 onChange={(e) => setEditActive(e.target.checked)}
+                disabled={currentRole === 'manager' && selectedUser?.role === 'admin'}
               />
             }
             label={editActive ? "Active" : "Inactive"}
@@ -667,6 +721,7 @@ const UsersPage: React.FC = () => {
                 onChange={(e) => setEditCanPrintChecks(e.target.checked)}
                 name="editCanPrintChecks"
                 color="primary"
+                disabled={currentRole === 'manager' && selectedUser?.role === 'admin'}
               />
             }
             label={
@@ -831,13 +886,18 @@ const UsersPage: React.FC = () => {
           )}
         </DialogContent>
         <DialogActions>
-          {selectedUser && (
+          {/* 🔒 Only show delete button if user has permission */}
+          {selectedUser && !(currentRole === 'manager' && selectedUser.role === 'admin') && (
             <Button color="error" onClick={handleDeleteUser}>
               Delete User
             </Button>
           )}
           <Button onClick={() => setOpenDetails(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleUpdateUser}>
+          <Button 
+            variant="contained" 
+            onClick={handleUpdateUser}
+            disabled={currentRole === 'manager' && selectedUser?.role === 'admin'}
+          >
             Save Changes
           </Button>
         </DialogActions>

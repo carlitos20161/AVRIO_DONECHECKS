@@ -30,10 +30,10 @@ import {
   DialogActions,
   Chip
 } from '@mui/material';
-import { Download, FilterList, Refresh, ExpandMore, Business, AttachMoney, People, Launch, FileDownload } from '@mui/icons-material';
+import { Download, FilterList, Refresh, ExpandMore, Business, AttachMoney, People, Launch, FileDownload, AssignmentInd } from '@mui/icons-material';
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from '../firebase';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 
 interface Company {
   id: string;
@@ -56,6 +56,8 @@ interface Employee {
   companyId: string;
   clientId?: string;
   payType?: string;
+  position?: string;
+  role?: string;
   clientPayTypeRelationships?: Array<{
     id: string;
     clientId: string;
@@ -75,6 +77,7 @@ interface Check {
   amount: number;
   hours?: number;
   payRate?: number;
+  otHours?: number;
   overtimeHours?: number;
   overtimeRate?: number;
   holidayHours?: number;
@@ -164,7 +167,13 @@ interface CompanyReport {
   checks: Check[];
 }
 
-const Report: React.FC = () => {
+interface ReportProps {
+  currentRole: string;
+  companyIds: string[];
+  visibleClientIds: string[]; // IDs of clients this user can see
+}
+
+const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientIds }) => {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -175,6 +184,8 @@ const Report: React.FC = () => {
   const [success, setSuccess] = useState<string | null>(null);
   const [selectedTab, setSelectedTab] = useState(0);
   const [selectedCompanyForEmployees, setSelectedCompanyForEmployees] = useState<string>('all');
+  const [selectedCompanyForEmployeeInfo, setSelectedCompanyForEmployeeInfo] = useState<string>('all');
+  const [includeInactiveEmployees, setIncludeInactiveEmployees] = useState<boolean>(false);
   const [selectedEmployees, setSelectedEmployees] = useState<Set<string>>(new Set());
   const [expandedCompany, setExpandedCompany] = useState<string | null>(null);
   const [divisionChecksDialog, setDivisionChecksDialog] = useState<{
@@ -245,22 +256,137 @@ const Report: React.FC = () => {
     });
   };
 
-  const exportDivisionToExcel = () => {
+  // Helper function to apply professional styling to ExcelJS worksheet
+  const applyProfessionalStyling = (worksheet: ExcelJS.Worksheet, hasTotal: boolean = false) => {
+    // Style header row
+    worksheet.getRow(1).height = 29;
+    worksheet.getRow(1).eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: 'FF000000' } };
+      cell.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFADD8E6' } // Light blue
+      };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.border = {
+        top: { style: 'thin', color: { argb: 'FF000000' } },
+        left: { style: 'thin', color: { argb: 'FF000000' } },
+        bottom: { style: 'thin', color: { argb: 'FF000000' } },
+        right: { style: 'thin', color: { argb: 'FF000000' } }
+      };
+    });
+
+    // Style data rows
+    const rowCount = worksheet.rowCount;
+    for (let rowNum = 2; rowNum <= rowCount; rowNum++) {
+      const row = worksheet.getRow(rowNum);
+      row.height = 20;
+      
+      // Check if this is the total row (last row if hasTotal is true)
+      const isTotalRow = hasTotal && rowNum === rowCount;
+      const isEvenRow = rowNum % 2 === 0;
+      
+      row.eachCell((cell, colNumber) => {
+        // Background color
+        if (isTotalRow) {
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFFFCC99' } // Light orange for total row
+          };
+          cell.font = { bold: true, color: { argb: 'FF000000' } };
+        } else {
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: isEvenRow ? 'FFFFFFFF' : 'FFD3D3D3' }
+          };
+          cell.font = { color: { argb: 'FF000000' } };
+        }
+        
+        // Alignment: numbers right-aligned, text left-aligned
+        const cellValue = cell.value;
+        const isNumber = typeof cellValue === 'number';
+        cell.alignment = { 
+          horizontal: isNumber ? 'right' : 'left',
+          vertical: 'middle'
+        };
+        
+        // Borders
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FF808080' } },
+          left: { style: 'thin', color: { argb: 'FF808080' } },
+          bottom: { style: 'thin', color: { argb: 'FF808080' } },
+          right: { style: 'thin', color: { argb: 'FF808080' } }
+        };
+      });
+    }
+  };
+
+  const exportDivisionToExcel = async () => {
     try {
       const { divisionName, clientName, checks } = divisionChecksDialog;
       
-      // Create division report data
-      const reportData = checks.map(check => {
+      // Create workbook with ExcelJS
+      const workbook = new ExcelJS.Workbook();
+      
+      // Add Division Details sheet
+      const worksheet = workbook.addWorksheet('Division Details');
+      
+      // Define columns with all headers
+      worksheet.columns = [
+        { header: 'Check Number', key: 'checkNumber', width: 15 },
+        { header: 'Company', key: 'company', width: 20 },
+        { header: 'Employee', key: 'employee', width: 25 },
+        { header: 'Division', key: 'division', width: 20 },
+        { header: 'Client', key: 'client', width: 20 },
+        { header: 'Pay Type', key: 'payType', width: 12 },
+        { header: 'Date', key: 'date', width: 12 },
+        { header: 'Hours Worked', key: 'hoursWorked', width: 12 },
+        { header: 'Pay Rate', key: 'payRate', width: 10 },
+        { header: 'Overtime Hours', key: 'overtimeHours', width: 14 },
+        { header: 'Overtime Rate', key: 'overtimeRate', width: 13 },
+        { header: 'Holiday Hours', key: 'holidayHours', width: 13 },
+        { header: 'Holiday Rate', key: 'holidayRate', width: 12 },
+        { header: 'Per Diem Amount', key: 'perDiemAmount', width: 15 },
+        { header: 'Per Diem Breakdown', key: 'perDiemBreakdown', width: 18 },
+        { header: 'Hourly Total', key: 'hourlyTotal', width: 13 },
+        { header: 'Total Amount', key: 'totalAmount', width: 13 },
+        { header: 'Paid', key: 'paid', width: 8 },
+        { header: 'Reviewed', key: 'reviewed', width: 10 },
+        { header: 'Memo', key: 'memo', width: 30 }
+      ];
+      
+      // Style header row
+      worksheet.getRow(1).height = 29;
+      worksheet.getRow(1).eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: 'FF000000' } };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFADD8E6' } // Light blue
+        };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FF000000' } },
+          left: { style: 'thin', color: { argb: 'FF000000' } },
+          bottom: { style: 'thin', color: { argb: 'FF000000' } },
+          right: { style: 'thin', color: { argb: 'FF000000' } }
+        };
+      });
+      
+      // Add data rows
+      checks.forEach((check, index) => {
         const company = companies.find(c => c.id === check.companyId);
         const employee = employees.find(e => e.id === check.employeeId);
         
         // Get relationship-specific data for export
         let relationshipHours = check.hours || 0;
-        let relationshipOtHours = check.overtimeHours || 0;
+        let relationshipOtHours = check.otHours || 0;
         let relationshipHolidayHours = check.holidayHours || 0;
         let relationshipPayRate = check.payRate || 0;
-        let relationshipOtRate = check.overtimeRate || 0;
-        let relationshipHolidayRate = check.holidayRate || 0;
+        let relationshipOtRate = 0;
+        let relationshipHolidayRate = 0;
         let perdiemTotal = check.perdiemAmount || 0;
         
         if (check.relationshipDetails && check.relationshipDetails.length > 0) {
@@ -269,14 +395,16 @@ const Report: React.FC = () => {
           ) || check.relationshipDetails[0];
           
           relationshipHours = relationship.hours || check.hours || 0;
-          relationshipOtHours = relationship.otHours || check.overtimeHours || 0;
+          relationshipOtHours = relationship.otHours || check.otHours || 0;
           relationshipHolidayHours = relationship.holidayHours || check.holidayHours || 0;
           relationshipPayRate = relationship.payRate || check.payRate || 0;
           perdiemTotal = relationship.perdiemAmount || check.perdiemAmount || 0;
-          
-          // For OT and Holiday rates, use check-wide rates
-          relationshipOtRate = check.overtimeRate || 0;
-          relationshipHolidayRate = check.holidayRate || 0;
+        }
+        
+        // Calculate OT and Holiday rates from base pay rate
+        if (relationshipPayRate > 0) {
+          relationshipOtRate = relationshipPayRate * 1.5;
+          relationshipHolidayRate = relationshipPayRate * 2.0;
         }
 
         // Calculate per diem total if breakdown exists
@@ -298,134 +426,139 @@ const Report: React.FC = () => {
         // Ensure amount is a number
         const amount = parseFloat(check.amount?.toString() || '0');
 
-        return {
-          'Check Number': check.checkNumber || check.id,
-          'Company': company?.name || 'Unknown Company',
-          'Employee': employee?.name || 'Unknown Employee',
-          'Division': divisionName,
-          'Client': clientName,
-          'Pay Type': check.payType,
-          'Date': check.date?.toDate ? check.date.toDate().toLocaleDateString() : new Date(check.date).toLocaleDateString(),
-          'Hours Worked': relationshipHours,
-          'Pay Rate': relationshipPayRate,
-          'Overtime Hours': relationshipOtHours,
-          'Overtime Rate': relationshipOtRate,
-          'Holiday Hours': relationshipHolidayHours,
-          'Holiday Rate': relationshipHolidayRate,
-          'Per Diem Amount': perdiemTotal,
-          'Per Diem Breakdown': check.perdiemBreakdown ? 'Yes' : 'No',
-          'Hourly Total': hourlyTotal,
-          'Total Amount': amount,
-          'Paid': check.paid ? 'Yes' : 'No',
-          'Reviewed': check.reviewed ? 'Yes' : 'No',
-          'Memo': check.memo || ''
+        const row = worksheet.addRow({
+          checkNumber: check.checkNumber || check.id,
+          company: company?.name || 'Unknown Company',
+          employee: employee?.name || 'Unknown Employee',
+          division: divisionName,
+          client: clientName,
+          payType: check.payType,
+          date: check.date?.toDate ? check.date.toDate().toLocaleDateString() : new Date(check.date).toLocaleDateString(),
+          hoursWorked: relationshipHours,
+          payRate: relationshipPayRate,
+          overtimeHours: relationshipOtHours,
+          overtimeRate: relationshipOtRate,
+          holidayHours: relationshipHolidayHours,
+          holidayRate: relationshipHolidayRate,
+          perDiemAmount: perdiemTotal,
+          perDiemBreakdown: check.perdiemBreakdown ? 'Yes' : 'No',
+          hourlyTotal: hourlyTotal,
+          totalAmount: amount,
+          paid: check.paid ? 'Yes' : 'No',
+          reviewed: check.reviewed ? 'Yes' : 'No',
+          memo: check.memo || ''
+        });
+        
+        // Set row height
+        row.height = 20;
+        
+        // Apply alternating row colors and styling
+        const isEvenRow = (index + 2) % 2 === 0; // +2 because header is row 1, data starts at row 2
+        
+        row.eachCell((cell, colNumber) => {
+          // Background color: white for even rows, light gray for odd rows
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: isEvenRow ? 'FFFFFFFF' : 'FFD3D3D3' }
+          };
+          
+          // Text color
+          cell.font = { color: { argb: 'FF000000' } };
+          
+          // Alignment: left for text, right for numbers/dates
+          // Number columns: Check Number(1), Hours Worked(8), Pay Rate(9), Overtime Hours(10), Overtime Rate(11), 
+          // Holiday Hours(12), Holiday Rate(13), Per Diem Amount(14), Hourly Total(16), Total Amount(17)
+          const numberColumns = [1, 8, 9, 10, 11, 12, 13, 14, 16, 17];
+          const isNumberColumn = numberColumns.includes(colNumber);
+          cell.alignment = { 
+            horizontal: isNumberColumn ? 'right' : 'left',
+            vertical: 'middle'
+          };
+          
+          // Borders
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FF808080' } },
+            left: { style: 'thin', color: { argb: 'FF808080' } },
+            bottom: { style: 'thin', color: { argb: 'FF808080' } },
+            right: { style: 'thin', color: { argb: 'FF808080' } }
+          };
+        });
+      });
+      
+      // Add Summary sheet
+      const summarySheet = workbook.addWorksheet('Summary');
+      
+      summarySheet.columns = [
+        { header: 'Division', key: 'division', width: 20 },
+        { header: 'Client', key: 'client', width: 20 },
+        { header: 'Total Checks', key: 'totalChecks', width: 15 },
+        { header: 'Total Amount', key: 'totalAmount', width: 15 },
+        { header: 'Paid Checks', key: 'paidChecks', width: 15 },
+        { header: 'Unpaid Checks', key: 'unpaidChecks', width: 15 }
+      ];
+      
+      // Style summary header row
+      summarySheet.getRow(1).height = 29;
+      summarySheet.getRow(1).eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: 'FF000000' } };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFADD8E6' }
+        };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FF000000' } },
+          left: { style: 'thin', color: { argb: 'FF000000' } },
+          bottom: { style: 'thin', color: { argb: 'FF000000' } },
+          right: { style: 'thin', color: { argb: 'FF000000' } }
+        };
+      });
+      
+      // Add summary data
+      const summaryRow = summarySheet.addRow({
+        division: divisionName,
+        client: clientName,
+        totalChecks: checks.length,
+        totalAmount: checks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0),
+        paidChecks: checks.filter(check => check.paid).length,
+        unpaidChecks: checks.filter(check => !check.paid).length
+      });
+      
+      summaryRow.height = 20;
+      summaryRow.eachCell((cell, colNumber) => {
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFFFFFF' }
+        };
+        cell.font = { color: { argb: 'FF000000' } };
+        const isNumberColumn = colNumber >= 3; // Total Checks, Total Amount, etc.
+        cell.alignment = { 
+          horizontal: isNumberColumn ? 'right' : 'left',
+          vertical: 'middle'
+        };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FF808080' } },
+          left: { style: 'thin', color: { argb: 'FF808080' } },
+          bottom: { style: 'thin', color: { argb: 'FF808080' } },
+          right: { style: 'thin', color: { argb: 'FF808080' } }
         };
       });
 
-      // Create workbook
-      const wb = XLSX.utils.book_new();
-      
-      // Add main data sheet
-      const ws = XLSX.utils.json_to_sheet(reportData);
-      
-      // Auto-adjust column widths
-      const colWidths: Array<{wch: number}> = [];
-      const headers = Object.keys(reportData[0] || {});
-      headers.forEach(header => {
-        let maxLength = header.length;
-        reportData.forEach(row => {
-          const cellValue = String((row as any)[header] || '');
-          if (cellValue.length > maxLength) {
-            maxLength = cellValue.length;
-          }
-        });
-        // Set minimum width of 10 and maximum of 50
-        colWidths.push({ wch: Math.min(Math.max(maxLength + 2, 10), 50) });
-      });
-      ws['!cols'] = colWidths;
-      
-      // Add center alignment for all cells
-      const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-      for (let R = range.s.r; R <= range.e.r; ++R) {
-        for (let C = range.s.c; C <= range.e.c; ++C) {
-          const address = XLSX.utils.encode_cell({ r: R, c: C });
-          if (!ws[address]) continue;
-          
-          if (R === 0) {
-            // Header row styling
-            ws[address].s = {
-              font: { bold: true, color: { rgb: "FFFFFF" } },
-              fill: { fgColor: { rgb: "4472C4" } },
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          } else {
-            // Data rows - center align all content including numbers
-            ws[address].s = {
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          }
-        }
-      }
-      
-      XLSX.utils.book_append_sheet(wb, ws, 'Division Details');
-
-      // Add summary sheet
-      const summaryData = [{
-        'Division': divisionName,
-        'Client': clientName,
-        'Total Checks': checks.length,
-        'Total Amount': checks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0),
-        'Paid Checks': checks.filter(check => check.paid).length,
-        'Unpaid Checks': checks.filter(check => !check.paid).length,
-        'Reviewed Checks': checks.filter(check => check.reviewed).length,
-        'Unreviewed Checks': checks.filter(check => !check.reviewed).length
-      }];
-      
-      const summaryWs = XLSX.utils.json_to_sheet(summaryData);
-      
-      // Auto-adjust summary column widths
-      const summaryColWidths: Array<{wch: number}> = [];
-      const summaryHeaders = Object.keys(summaryData[0] || {});
-      summaryHeaders.forEach(header => {
-        let maxLength = header.length;
-        summaryData.forEach(row => {
-          const cellValue = String((row as any)[header] || '');
-          if (cellValue.length > maxLength) {
-            maxLength = cellValue.length;
-          }
-        });
-        summaryColWidths.push({ wch: Math.min(Math.max(maxLength + 2, 10), 50) });
-      });
-      summaryWs['!cols'] = summaryColWidths;
-      
-      // Add center alignment for summary sheet
-      const summaryRange = XLSX.utils.decode_range(summaryWs['!ref'] || 'A1');
-      for (let R = summaryRange.s.r; R <= summaryRange.e.r; ++R) {
-        for (let C = summaryRange.s.c; C <= summaryRange.e.c; ++C) {
-          const address = XLSX.utils.encode_cell({ r: R, c: C });
-          if (!summaryWs[address]) continue;
-          
-          if (R === 0) {
-            // Header row styling
-            summaryWs[address].s = {
-              font: { bold: true, color: { rgb: "FFFFFF" } },
-              fill: { fgColor: { rgb: "4472C4" } },
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          } else {
-            // Data rows - center align all content
-            summaryWs[address].s = {
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          }
-        }
-      }
-      
-      XLSX.utils.book_append_sheet(wb, summaryWs, 'Summary');
-
       // Generate filename and download
       const filename = `${divisionName.replace(/[^a-zA-Z0-9]/g, '_')}_${clientName.replace(/[^a-zA-Z0-9]/g, '_')}_report_${new Date().toISOString().split('T')[0]}.xlsx`;
-      XLSX.writeFile(wb, filename);
+      
+      // Write to buffer and download
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      window.URL.revokeObjectURL(url);
 
       setSuccess(`Division report exported successfully as ${filename}`);
     } catch (error) {
@@ -458,10 +591,21 @@ const Report: React.FC = () => {
 
       // Fetch clients
       const clientsSnap = await getDocs(collection(db, 'clients'));
-      const clientsData = clientsSnap.docs.map(doc => ({
+      let clientsData = clientsSnap.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
       })) as Client[];
+      
+      // 🔒 SECURITY: Filter clients by visibleClientIds (only show clients user has access to)
+      if (currentRole !== 'admin' && visibleClientIds.length > 0) {
+        clientsData = clientsData.filter(client => visibleClientIds.includes(client.id));
+        console.log('🔒 [Report Security] Filtered clients by visibleClientIds:', {
+          originalCount: clientsSnap.docs.length,
+          filteredCount: clientsData.length,
+          visibleClientIds
+        });
+      }
+      
       setClients(clientsData);
 
       // Fetch employees
@@ -497,6 +641,29 @@ const Report: React.FC = () => {
     // Apply company filter
     if (filters.companyId) {
       filteredChecks = filteredChecks.filter(check => check.companyId === filters.companyId);
+    }
+
+    // 🔒 SECURITY: Filter by visibleClientIds (only show clients user has access to)
+    // Admins see everything, managers/users only see their assigned clients
+    if (currentRole !== 'admin' && visibleClientIds.length > 0) {
+      filteredChecks = filteredChecks.filter(check => {
+        // Check if check's client is in visible clients
+        if (check.clientId && visibleClientIds.includes(check.clientId)) {
+          return true;
+        }
+        // Also check relationship details for multi-client checks
+        if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+          return check.relationshipDetails.some(rel => 
+            rel.clientId && visibleClientIds.includes(rel.clientId)
+          );
+        }
+        return false;
+      });
+      console.log('🔒 [Report Security] Filtered checks by visibleClientIds:', {
+        originalCount: checks.length,
+        filteredCount: filteredChecks.length,
+        visibleClientIds
+      });
     }
 
     // Apply date filters
@@ -756,9 +923,10 @@ const Report: React.FC = () => {
                 console.log(`🔍 [Report] Processing HOURLY relationship for ${rel.clientName}`);
                 
                 // Calculate relationship-specific hourly amounts
-                const relHours = rel.hours || 0;
-                const relOtHours = rel.otHours || 0;
-                const relHolidayHours = rel.holidayHours || 0;
+                // Fallback to top-level check fields if relationshipDetails doesn't have hours
+                const relHours = rel.hours || check.hours || 0;
+                const relOtHours = rel.otHours || check.otHours || 0;
+                const relHolidayHours = rel.holidayHours || check.holidayHours || 0;
                 const relPayRate = rel.payRate || 0;
                 
                 console.log(`🔍 [Report] Hourly values:`, {
@@ -804,21 +972,23 @@ const Report: React.FC = () => {
                 console.log(`🔍 [Report] Processing PER DIEM relationship for ${rel.clientName}`);
                 
                 // Calculate relationship-specific per diem amounts
+                // Fallback to top-level check fields if relationshipDetails doesn't have per diem data
                 let relPerdiemTotal = 0;
                 
-                if (rel.perdiemBreakdown) {
+                const hasBreakdown = rel.perdiemBreakdown !== undefined ? rel.perdiemBreakdown : check.perdiemBreakdown;
+                if (hasBreakdown) {
                   console.log(`🔍 [Report] Processing per diem breakdown for ${rel.clientName}`);
-                  // Sum daily breakdown
-                  relPerdiemTotal = (rel.perdiemMonday || 0) + 
-                                   (rel.perdiemTuesday || 0) + 
-                                   (rel.perdiemWednesday || 0) + 
-                                   (rel.perdiemThursday || 0) + 
-                                   (rel.perdiemFriday || 0) + 
-                                   (rel.perdiemSaturday || 0) + 
-                                   (rel.perdiemSunday || 0);
+                  // Sum daily breakdown - use rel values or fallback to check values
+                  relPerdiemTotal = (rel.perdiemMonday || check.perdiemMonday || 0) + 
+                                   (rel.perdiemTuesday || check.perdiemTuesday || 0) + 
+                                   (rel.perdiemWednesday || check.perdiemWednesday || 0) + 
+                                   (rel.perdiemThursday || check.perdiemThursday || 0) + 
+                                   (rel.perdiemFriday || check.perdiemFriday || 0) + 
+                                   (rel.perdiemSaturday || check.perdiemSaturday || 0) + 
+                                   (rel.perdiemSunday || check.perdiemSunday || 0);
                   console.log(`🔍 [Report] Daily breakdown total: ${relPerdiemTotal}`);
                 } else {
-                  relPerdiemTotal = rel.perdiemAmount || 0;
+                  relPerdiemTotal = rel.perdiemAmount || check.perdiemAmount || 0;
                   console.log(`🔍 [Report] Using per diem amount directly: ${relPerdiemTotal}`);
                 }
                 
@@ -975,22 +1145,7 @@ const Report: React.FC = () => {
         };
       }).filter(Boolean);
 
-      // Create workbook
-      const wb = XLSX.utils.book_new();
-
-      // Client Breakdown sheet
-      const clientBreakdownHeaders = ['Client', 'Company', 'Total Checks', 'Hourly Amount', 'Per Diem Amount', 'Total Amount', 'Status'];
-      const clientBreakdownRows = clientBreakdownData.map(item => [
-        item!.client,
-        item!.company,
-        item!.totalChecks,
-        item!.hourlyAmount,
-        item!.perdiemAmount,
-        item!.totalAmount,
-        item!.status
-      ]);
-
-      // Add totals row
+      // Calculate totals
       const totals = clientBreakdownData.reduce((acc, item) => ({
         totalChecks: acc.totalChecks + item!.totalChecks,
         hourlyAmount: acc.hourlyAmount + item!.hourlyAmount,
@@ -998,42 +1153,54 @@ const Report: React.FC = () => {
         totalAmount: acc.totalAmount + item!.totalAmount
       }), { totalChecks: 0, hourlyAmount: 0, perdiemAmount: 0, totalAmount: 0 });
 
-      const totalRow = ['TOTAL', '', totals.totalChecks, totals.hourlyAmount, totals.perdiemAmount, totals.totalAmount, ''];
-      
-      const clientBreakdownSheetData = [clientBreakdownHeaders, ...clientBreakdownRows, totalRow];
-      const ws = XLSX.utils.aoa_to_sheet(clientBreakdownSheetData);
+      // Create workbook with ExcelJS
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Client Breakdown');
 
-      // Auto-adjust column widths
-      const colWidths: Array<{wch: number}> = clientBreakdownHeaders.map((_, index) => {
-        const maxLength = Math.max(
-          clientBreakdownHeaders[index]?.length || 0,
-          ...clientBreakdownSheetData.map(row => String(row[index] || '').length)
-        );
-        return { wch: Math.min(Math.max(maxLength + 2, 10), 30) };
+      // Define columns
+      worksheet.columns = [
+        { header: 'Client', key: 'client', width: 25 },
+        { header: 'Company', key: 'company', width: 20 },
+        { header: 'Total Checks', key: 'totalChecks', width: 15 },
+        { header: 'Hourly Amount', key: 'hourlyAmount', width: 15 },
+        { header: 'Per Diem Amount', key: 'perdiemAmount', width: 16 },
+        { header: 'Total Amount', key: 'totalAmount', width: 15 },
+        { header: 'Status', key: 'status', width: 12 }
+      ];
+
+      // Add data rows
+      clientBreakdownData.forEach(item => {
+        worksheet.addRow(item!);
       });
-      ws['!cols'] = colWidths;
 
-      // Center align all cells
-      const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-      for (let row = range.s.r; row <= range.e.r; row++) {
-        for (let col = range.s.c; col <= range.e.c; col++) {
-          const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
-          if (!ws[cellAddress]) continue;
-          ws[cellAddress].s = {
-            alignment: { horizontal: 'center', vertical: 'center' }
-          };
-        }
-      }
+      // Add total row
+      worksheet.addRow({
+        client: 'TOTAL',
+        company: '',
+        totalChecks: totals.totalChecks,
+        hourlyAmount: totals.hourlyAmount,
+        perdiemAmount: totals.perdiemAmount,
+        totalAmount: totals.totalAmount,
+        status: ''
+      });
 
-      XLSX.utils.book_append_sheet(wb, ws, 'Client Breakdown');
+      // Apply professional styling
+      applyProfessionalStyling(worksheet, true);
 
       // Generate filename with date range
       const startDate = filters.startDate ? new Date(filters.startDate).toLocaleDateString() : 'All';
       const endDate = filters.endDate ? new Date(filters.endDate).toLocaleDateString() : 'All';
       const filename = `Client_Breakdown_${startDate}_to_${endDate}.xlsx`;
 
-      // Save file
-      XLSX.writeFile(wb, filename);
+      // Write to buffer and download
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      window.URL.revokeObjectURL(url);
 
       setSuccess(`Departments Breakdown exported successfully as ${filename}`);
     } catch (err) {
@@ -1077,6 +1244,7 @@ const Report: React.FC = () => {
           return {
             employee: employee.name,
             company: company?.name || 'Unknown',
+        role: employee.role || employee.position || 'N/A',
             totalChecks,
             totalAmount,
             averagePerCheck
@@ -1093,64 +1261,61 @@ const Report: React.FC = () => {
           return a!.employee.localeCompare(b!.employee);
         });
 
-      // Create workbook
-      const wb = XLSX.utils.book_new();
-
-      // Employee Summary sheet
-      const employeeSummaryHeaders = ['Employee', 'Company', 'Total Checks', 'Total Amount', 'Average per Check'];
-      const employeeSummaryRows = employeeSummaryData.map(item => [
-        item!.employee,
-        item!.company,
-        item!.totalChecks,
-        item!.totalAmount,
-        item!.averagePerCheck
-      ]);
-
-      // Add totals row
+      // Calculate totals
       const totals = employeeSummaryData.reduce((acc, item) => ({
         totalChecks: acc.totalChecks + item!.totalChecks,
         totalAmount: acc.totalAmount + item!.totalAmount
       }), { totalChecks: 0, totalAmount: 0 });
 
-      const totalRow = ['TOTAL', '', totals.totalChecks, totals.totalAmount, ''];
-      
-      const employeeSummarySheetData = [employeeSummaryHeaders, ...employeeSummaryRows, totalRow];
-      const ws = XLSX.utils.aoa_to_sheet(employeeSummarySheetData);
-
-      // Auto-adjust column widths
-      const colWidths: Array<{wch: number}> = employeeSummaryHeaders.map((_, index) => {
-        const maxLength = Math.max(
-          employeeSummaryHeaders[index]?.length || 0,
-          ...employeeSummarySheetData.map(row => String(row[index] || '').length)
-        );
-        return { wch: Math.min(Math.max(maxLength + 2, 10), 30) };
-      });
-      ws['!cols'] = colWidths;
-
-      // Center align all cells
-      const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-      for (let row = range.s.r; row <= range.e.r; row++) {
-        for (let col = range.s.c; col <= range.e.c; col++) {
-          const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
-          if (!ws[cellAddress]) continue;
-          ws[cellAddress].s = {
-            alignment: { horizontal: 'center', vertical: 'center' }
-          };
-        }
-      }
-
-      // Generate sheet name and filename based on company
+      // Create workbook with ExcelJS
+      const workbook = new ExcelJS.Workbook();
       const company = companies.find(c => c.id === companyId);
       const sheetName = companyId === 'all' ? 'Employee Summary' : `${company?.name || 'Company'} Employees`;
+      const worksheet = workbook.addWorksheet(sheetName);
+
+      // Define columns
+      worksheet.columns = [
+        { header: 'Employee', key: 'employee', width: 25 },
+        { header: 'Company', key: 'company', width: 20 },
+        { header: 'Role', key: 'role', width: 20 },
+        { header: 'Total Checks', key: 'totalChecks', width: 15 },
+        { header: 'Total Amount', key: 'totalAmount', width: 15 },
+        { header: 'Average per Check', key: 'averagePerCheck', width: 18 }
+      ];
+
+      // Add data rows
+      employeeSummaryData.forEach(item => {
+        worksheet.addRow(item!);
+      });
+
+      // Add total row
+      worksheet.addRow({
+        employee: 'TOTAL',
+        company: '',
+        role: '',
+        totalChecks: totals.totalChecks,
+        totalAmount: totals.totalAmount,
+        averagePerCheck: ''
+      });
+
+      // Apply professional styling
+      applyProfessionalStyling(worksheet, true);
+
+      // Generate filename
       const startDate = filters.startDate ? new Date(filters.startDate).toLocaleDateString() : 'All';
       const endDate = filters.endDate ? new Date(filters.endDate).toLocaleDateString() : 'All';
       const companyName = companyId === 'all' ? 'All_Companies' : (company?.name || 'Company').replace(/\s+/g, '_');
       const filename = `Employee_Summary_${companyName}_${startDate}_to_${endDate}.xlsx`;
 
-      XLSX.utils.book_append_sheet(wb, ws, sheetName);
-
-      // Save file
-      XLSX.writeFile(wb, filename);
+      // Write to buffer and download
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      window.URL.revokeObjectURL(url);
 
       const exportType = companyId === 'all' ? 'All Companies' : company?.name || 'Selected Company';
       setSuccess(`Employee Summary for ${exportType} exported successfully as ${filename}`);
@@ -1301,57 +1466,32 @@ const Report: React.FC = () => {
         };
       });
 
-      // Create workbook with multiple sheets
-      const wb = XLSX.utils.book_new();
+      // Create workbook with multiple sheets using ExcelJS
+      const workbook = new ExcelJS.Workbook();
 
-      // Main checks sheet with improved formatting
-      const wsChecks = XLSX.utils.json_to_sheet(reportData);
+      // Main checks sheet with professional formatting
+      const checksWorksheet = workbook.addWorksheet('Checks');
       
-      // Auto-adjust column widths for better readability
-      const columnWidths: Array<{wch: number}> = [];
+      // Define columns from reportData keys
       const headers = Object.keys(reportData[0] || {});
-      headers.forEach(header => {
-        let maxLength = header.length;
+      checksWorksheet.columns = headers.map(header => ({
+        header: header,
+        key: header,
+        width: Math.min(Math.max(header.length + 5, 12), 30)
+      }));
+      
+      // Add data rows
         reportData.forEach(row => {
-          const cellValue = String((row as any)[header] || '');
-          if (cellValue.length > maxLength) {
-            maxLength = cellValue.length;
-          }
-        });
-        // Set minimum width of 10 and maximum of 50
-        columnWidths.push({ wch: Math.min(Math.max(maxLength + 2, 10), 50) });
+        checksWorksheet.addRow(row);
       });
-      wsChecks['!cols'] = columnWidths;
       
-      // Add header styling and center-align all data
-      const range = XLSX.utils.decode_range(wsChecks['!ref'] || 'A1');
-      for (let R = range.s.r; R <= range.e.r; ++R) {
-        for (let C = range.s.c; C <= range.e.c; ++C) {
-          const address = XLSX.utils.encode_cell({ r: R, c: C });
-          if (!wsChecks[address]) continue;
-          
-          if (R === 0) {
-            // Header row styling
-            wsChecks[address].s = {
-              font: { bold: true, color: { rgb: "FFFFFF" } },
-              fill: { fgColor: { rgb: "4472C4" } },
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          } else {
-            // Data rows - center align all content including numbers
-            wsChecks[address].s = {
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          }
-        }
-      }
-      
-      // Add total sum row at the bottom
-      const totalRow = {
+      // Add total sum row
+      checksWorksheet.addRow({
         'Check Number': 'TOTAL',
         'Company': '',
         'Employee': '',
         'Client(s)': '',
+        'Division': '',
         'Pay Type': '',
         'Work Week': '',
         'Week Key': '',
@@ -1387,78 +1527,40 @@ const Report: React.FC = () => {
         'Hourly Total': '',
         'Total Amount': dataToExport.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0),
         'Memo': ''
-      };
+      });
       
-      // Add total row to the worksheet by appending to the data
-      const totalRowData = Object.values(totalRow);
-      const totalRowIndex = reportData.length;
-      
-      // Create a new row in the worksheet for totals
-      for (let C = 0; C < totalRowData.length; ++C) {
-        const address = XLSX.utils.encode_cell({ r: totalRowIndex, c: C });
-        const value = totalRowData[C];
-        
-        if (typeof value === 'number') {
-          wsChecks[address] = { v: value, t: 'n' };
-        } else {
-          wsChecks[address] = { v: value, t: 's' };
-        }
-        
-        // Style the total row with bold text and different background
-        wsChecks[address].s = {
-          font: { bold: true },
-          fill: { fgColor: { rgb: "E6E6E6" } },
-          alignment: { horizontal: "center", vertical: "center" }
-        };
+      // Apply professional styling to checks sheet
+      applyProfessionalStyling(checksWorksheet, true);
+
+      // Company summary sheet - filter by selected company if provided
+      let companyReports = generateCompanyReports();
+      if (companyId) {
+        companyReports = companyReports.filter(report => report.company.id === companyId);
       }
       
-      XLSX.utils.book_append_sheet(wb, wsChecks, 'Checks');
-
-      // Company summary sheet with improved formatting
-      const companyReports = generateCompanyReports();
-      const companySummary = companyReports.map(report => ({
-        'Company': report.company.name,
-        'Total Checks': report.totalChecks,
-        'Total Amount': report.totalAmount,
-        'Active': report.company.active ? 'Yes' : 'No'
-      }));
-      const wsCompanySummary = XLSX.utils.json_to_sheet(companySummary);
-      
-      // Set column widths for company summary
-      wsCompanySummary['!cols'] = [
-        { wch: 25 }, // Company
-        { wch: 15 }, // Total Checks
-        { wch: 18 }, // Total Amount
-        { wch: 10 }  // Active
+      const companySummarySheet = workbook.addWorksheet('Company Summary');
+      companySummarySheet.columns = [
+        { header: 'Company', key: 'company', width: 25 },
+        { header: 'Total Checks', key: 'totalChecks', width: 15 },
+        { header: 'Total Amount', key: 'totalAmount', width: 18 },
+        { header: 'Active', key: 'active', width: 10 }
       ];
       
-      // Add header styling and center-align all data
-      const companyRange = XLSX.utils.decode_range(wsCompanySummary['!ref'] || 'A1');
-      for (let R = companyRange.s.r; R <= companyRange.e.r; ++R) {
-        for (let C = companyRange.s.c; C <= companyRange.e.c; ++C) {
-          const address = XLSX.utils.encode_cell({ r: R, c: C });
-          if (!wsCompanySummary[address]) continue;
-          
-          if (R === 0) {
-            // Header row styling
-            wsCompanySummary[address].s = {
-              font: { bold: true, color: { rgb: "FFFFFF" } },
-              fill: { fgColor: { rgb: "70AD47" } },
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          } else {
-            // Data rows - center align all content
-            wsCompanySummary[address].s = {
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          }
-        }
-      }
+      companyReports.forEach(report => {
+        companySummarySheet.addRow({
+          company: report.company.name,
+          totalChecks: report.totalChecks,
+          totalAmount: report.totalAmount,
+          active: report.company.active ? 'Yes' : 'No'
+        });
+      });
       
-      XLSX.utils.book_append_sheet(wb, wsCompanySummary, 'Company Summary');
+      // Apply professional styling to company summary sheet
+      applyProfessionalStyling(companySummarySheet, false);
 
-      // Client summary sheet with improved formatting
-      const clientSummary = clients.map(client => {
+      // Client summary sheet - only for clients in dataToExport with checks
+      const clientSummary = clients
+        .map(client => {
         const clientChecks = dataToExport.filter(check => 
           check.clientId === client.id || 
           check.relationshipDetails?.some(rel => rel.clientId === client.id)
@@ -1473,45 +1575,25 @@ const Report: React.FC = () => {
           'Total Amount': totalAmount,
           'Active': client.active ? 'Yes' : 'No'
         };
-      });
-      const wsClientSummary = XLSX.utils.json_to_sheet(clientSummary);
+        })
+        .filter(item => item['Total Checks'] > 0); // Only include clients with checks
       
-      // Set column widths for client summary
-      wsClientSummary['!cols'] = [
-        { wch: 25 }, // Client
-        { wch: 25 }, // Company
-        { wch: 15 }, // Total Checks
-        { wch: 18 }, // Total Amount
-        { wch: 10 }  // Active
+      const clientSummarySheet = workbook.addWorksheet('Client Summary');
+      clientSummarySheet.columns = [
+        { header: 'Client', key: 'Client', width: 25 },
+        { header: 'Company', key: 'Company', width: 25 },
+        { header: 'Total Checks', key: 'Total Checks', width: 15 },
+        { header: 'Total Amount', key: 'Total Amount', width: 18 },
+        { header: 'Active', key: 'Active', width: 10 }
       ];
-      
-      // Add header styling and center-align all data
-      const clientRange = XLSX.utils.decode_range(wsClientSummary['!ref'] || 'A1');
-      for (let R = clientRange.s.r; R <= clientRange.e.r; ++R) {
-        for (let C = clientRange.s.c; C <= clientRange.e.c; ++C) {
-          const address = XLSX.utils.encode_cell({ r: R, c: C });
-          if (!wsClientSummary[address]) continue;
-          
-          if (R === 0) {
-            // Header row styling
-            wsClientSummary[address].s = {
-              font: { bold: true, color: { rgb: "FFFFFF" } },
-              fill: { fgColor: { rgb: "ED7D31" } },
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          } else {
-            // Data rows - center align all content
-            wsClientSummary[address].s = {
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          }
-        }
-      }
-      
-      XLSX.utils.book_append_sheet(wb, wsClientSummary, 'Client Summary');
+      clientSummary.forEach(item => clientSummarySheet.addRow(item));
+      applyProfessionalStyling(clientSummarySheet, false);
 
-      // Company → Client → Division breakdown sheet
-      const breakdownReports = generateCompanyReports();
+      // Company → Client → Division breakdown sheet - filter by selected company if provided
+      let breakdownReports = generateCompanyReports();
+      if (companyId) {
+        breakdownReports = breakdownReports.filter(report => report.company.id === companyId);
+      }
       const breakdownData: any[] = [];
       
       breakdownReports.forEach(report => {
@@ -1530,46 +1612,23 @@ const Report: React.FC = () => {
         });
       });
       
-      const wsBreakdown = XLSX.utils.json_to_sheet(breakdownData);
-      
-      // Set column widths for breakdown
-      wsBreakdown['!cols'] = [
-        { wch: 25 }, // Company
-        { wch: 25 }, // Client
-        { wch: 20 }, // Division
-        { wch: 15 }, // Total Checks
-        { wch: 18 }, // Hourly Amount
-        { wch: 18 }, // Per Diem Amount
-        { wch: 18 }  // Total Amount
+      const breakdownSheet = workbook.addWorksheet('Company→Client→Division');
+      breakdownSheet.columns = [
+        { header: 'Company', key: 'Company', width: 25 },
+        { header: 'Client', key: 'Client', width: 25 },
+        { header: 'Division', key: 'Division', width: 20 },
+        { header: 'Total Checks', key: 'Total Checks', width: 15 },
+        { header: 'Hourly Amount', key: 'Hourly Amount', width: 18 },
+        { header: 'Per Diem Amount', key: 'Per Diem Amount', width: 18 },
+        { header: 'Total Amount', key: 'Total Amount', width: 18 }
       ];
-      
-      // Add header styling and center-align all data
-      const breakdownRange = XLSX.utils.decode_range(wsBreakdown['!ref'] || 'A1');
-      for (let R = breakdownRange.s.r; R <= breakdownRange.e.r; ++R) {
-        for (let C = breakdownRange.s.c; C <= breakdownRange.e.c; ++C) {
-          const address = XLSX.utils.encode_cell({ r: R, c: C });
-          if (!wsBreakdown[address]) continue;
-          
-          if (R === 0) {
-            // Header row styling
-            wsBreakdown[address].s = {
-              font: { bold: true, color: { rgb: "FFFFFF" } },
-              fill: { fgColor: { rgb: "7030A0" } },
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          } else {
-            // Data rows - center align all content
-            wsBreakdown[address].s = {
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          }
-        }
-      }
-      
-      XLSX.utils.book_append_sheet(wb, wsBreakdown, 'Company→Client→Division');
+      breakdownData.forEach(item => breakdownSheet.addRow(item));
+      applyProfessionalStyling(breakdownSheet, false);
 
-      // Employee summary sheet with improved formatting
-      const employeeSummary = employees.map(employee => {
+      // Employee summary sheet - only for employees in dataToExport with checks
+      const employeeSummary = employees
+        .filter(employee => !companyId || employee.companyId === companyId) // Filter by company if specified
+        .map(employee => {
         const employeeChecks = dataToExport.filter(check => check.employeeId === employee.id);
         const totalAmount = employeeChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
         const totalChecks = employeeChecks.length;
@@ -1581,45 +1640,29 @@ const Report: React.FC = () => {
           'Total Amount': totalAmount,
           'Active': employee.active ? 'Yes' : 'No'
         };
-      });
-      const wsEmployeeSummary = XLSX.utils.json_to_sheet(employeeSummary);
+        })
+        .filter(item => item['Total Checks'] > 0); // Only include employees with checks
       
-      // Set column widths for employee summary
-      wsEmployeeSummary['!cols'] = [
-        { wch: 25 }, // Employee
-        { wch: 25 }, // Company
-        { wch: 15 }, // Total Checks
-        { wch: 18 }, // Total Amount
-        { wch: 10 }  // Active
+      const employeeSummarySheet = workbook.addWorksheet('Employee Summary');
+      employeeSummarySheet.columns = [
+        { header: 'Employee', key: 'Employee', width: 25 },
+        { header: 'Company', key: 'Company', width: 25 },
+        { header: 'Total Checks', key: 'Total Checks', width: 15 },
+        { header: 'Total Amount', key: 'Total Amount', width: 18 },
+        { header: 'Active', key: 'Active', width: 10 }
       ];
-      
-      // Add header styling and center-align all data
-      const employeeRange = XLSX.utils.decode_range(wsEmployeeSummary['!ref'] || 'A1');
-      for (let R = employeeRange.s.r; R <= employeeRange.e.r; ++R) {
-        for (let C = employeeRange.s.c; C <= employeeRange.e.c; ++C) {
-          const address = XLSX.utils.encode_cell({ r: R, c: C });
-          if (!wsEmployeeSummary[address]) continue;
-          
-          if (R === 0) {
-            // Header row styling
-            wsEmployeeSummary[address].s = {
-              font: { bold: true, color: { rgb: "FFFFFF" } },
-              fill: { fgColor: { rgb: "A5A5A5" } },
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          } else {
-            // Data rows - center align all content
-            wsEmployeeSummary[address].s = {
-              alignment: { horizontal: "center", vertical: "center" }
-            };
-          }
-        }
-      }
-      
-      XLSX.utils.book_append_sheet(wb, wsEmployeeSummary, 'Employee Summary');
+      employeeSummary.forEach(item => employeeSummarySheet.addRow(item));
+      applyProfessionalStyling(employeeSummarySheet, false);
 
-      // Export the file
-      XLSX.writeFile(wb, filename);
+      // Export the file using ExcelJS
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      window.URL.revokeObjectURL(url);
       
       const companyName = companyId ? companies.find(c => c.id === companyId)?.name : 'All Companies';
       setSuccess(`${companyName} report exported successfully! ${dataToExport.length} checks included.`);
@@ -1627,6 +1670,126 @@ const Report: React.FC = () => {
     } catch (err) {
       console.error('Error exporting report:', err);
       setError('Failed to export report. Please try again.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const exportEmployeeInfoReport = async () => {
+    setExporting(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const filteredEmployees = employees
+        .filter(employee => selectedCompanyForEmployeeInfo === 'all' || employee.companyId === selectedCompanyForEmployeeInfo)
+        .filter(employee => includeInactiveEmployees || employee.active);
+
+      const sortedEmployees = [...filteredEmployees].sort((a, b) => {
+        const companyA = companies.find(c => c.id === a.companyId)?.name || '';
+        const companyB = companies.find(c => c.id === b.companyId)?.name || '';
+        if (companyA !== companyB) {
+          return companyA.localeCompare(companyB);
+        }
+        return a.name.localeCompare(b.name);
+      });
+
+      if (sortedEmployees.length === 0) {
+        setError('No employee information available for the selected filters.');
+        return;
+      }
+
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Employee Information');
+
+      worksheet.columns = [
+        { header: 'Employee', key: 'employeeName', width: 25 },
+        { header: 'Company', key: 'companyName', width: 20 },
+        { header: 'Role', key: 'role', width: 18 },
+        { header: 'Status', key: 'status', width: 12 },
+        { header: 'Total Relationships', key: 'totalRelationships', width: 18 },
+        { header: 'Clients', key: 'clients', width: 30 },
+        { header: 'Pay Types / Details', key: 'payTypes', width: 45 }
+      ];
+
+      const companyHeaderRows: number[] = [];
+      let currentCompanyName = '';
+
+      sortedEmployees.forEach(employee => {
+        const company = companies.find(c => c.id === employee.companyId);
+        const companyName = company?.name || 'Unknown Company';
+
+        if (companyName !== currentCompanyName) {
+          currentCompanyName = companyName;
+          const companyRow = worksheet.addRow({
+            employeeName: companyName,
+            companyName: '',
+            role: '',
+            status: '',
+            totalRelationships: '',
+            clients: '',
+            payTypes: ''
+          });
+          companyHeaderRows.push(companyRow.number);
+        }
+
+        const relationships = (employee.clientPayTypeRelationships || []).map(rel => {
+          const clientName = clients.find(c => c.id === rel.clientId)?.name || rel.clientName || 'Unknown Client';
+          const payRate = rel.payRate ? `$${rel.payRate}` : '';
+          return `${clientName} – ${rel.payType}${payRate ? ` (${payRate})` : ''}`;
+        });
+        const uniqueClients = new Set(
+          (employee.clientPayTypeRelationships || []).map(
+            rel => clients.find(c => c.id === rel.clientId)?.name || rel.clientName || 'Unknown Client'
+          )
+        );
+
+        worksheet.addRow({
+          employeeName: employee.name,
+          companyName,
+          role: employee.role || employee.position || employee.payType || 'N/A',
+          status: employee.active ? 'Active' : 'Inactive',
+          totalRelationships: employee.clientPayTypeRelationships?.length || 0,
+          clients: Array.from(uniqueClients).join(', ') || 'N/A',
+          payTypes: relationships.join('; ') || (employee.payType || 'N/A')
+        });
+      });
+
+      applyProfessionalStyling(worksheet, false);
+
+      companyHeaderRows.forEach(rowNumber => {
+        const row = worksheet.getRow(rowNumber);
+        row.eachCell(cell => {
+          cell.font = { bold: true, color: { argb: 'FF000000' } };
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFE8F4FD' }
+          };
+          cell.alignment = { horizontal: 'left', vertical: 'middle' };
+        });
+      });
+
+      const companyName =
+        selectedCompanyForEmployeeInfo === 'all'
+          ? 'All_Companies'
+          : (companies.find(c => c.id === selectedCompanyForEmployeeInfo)?.name || 'Company').replace(/\s+/g, '_');
+
+      const filename = `Employee_Information_Report_${companyName}_${new Date().toISOString().split('T')[0]}.xlsx`;
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      window.URL.revokeObjectURL(url);
+
+      setSuccess(`Employee information report exported successfully as ${filename}`);
+    } catch (err) {
+      console.error('Export error:', err);
+      setError('Failed to export Employee Information Report. Please try again.');
     } finally {
       setExporting(false);
     }
@@ -1797,6 +1960,11 @@ const Report: React.FC = () => {
           <Tab 
             icon={<People />} 
             label="Employee Summary" 
+            iconPosition="start"
+          />
+          <Tab 
+            icon={<AssignmentInd />} 
+            label="Employee Info Report" 
             iconPosition="start"
           />
         </Tabs>
@@ -2278,6 +2446,7 @@ const Report: React.FC = () => {
                     </TableCell>
                     <TableCell>Employee</TableCell>
                     <TableCell>Company</TableCell>
+                    <TableCell>Role</TableCell>
                     <TableCell align="right">Total Checks</TableCell>
                     <TableCell align="right">Total Amount</TableCell>
                     <TableCell align="right">Average per Check</TableCell>
@@ -2306,6 +2475,7 @@ const Report: React.FC = () => {
                         return {
                           employee,
                           company: company?.name || 'Unknown',
+                        role: employee.role || employee.position || employee.payType || 'N/A',
                           totalAmount,
                           totalChecks,
                           averagePerCheck
@@ -2340,11 +2510,159 @@ const Report: React.FC = () => {
                           </TableCell>
                           <TableCell>{item!.employee.name}</TableCell>
                           <TableCell>{item!.company}</TableCell>
+                          <TableCell>{item!.role}</TableCell>
                           <TableCell align="right">{item!.totalChecks}</TableCell>
                           <TableCell align="right">${item!.totalAmount.toLocaleString()}</TableCell>
                           <TableCell align="right">${item!.averagePerCheck.toFixed(2)}</TableCell>
                         </TableRow>
                       ));
+                  })()}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Box>
+        )}
+
+        {/* Employee Information Report Tab */}
+        {selectedTab === 3 && (
+          <Box>
+            <Typography variant="h6" gutterBottom>
+              Employee Information Report
+            </Typography>
+
+            <Box sx={{ mb: 3, display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+                <FormControl sx={{ minWidth: 200 }}>
+                  <InputLabel>Select Company</InputLabel>
+                  <Select
+                    value={selectedCompanyForEmployeeInfo}
+                    onChange={(e) => setSelectedCompanyForEmployeeInfo(e.target.value)}
+                    label="Select Company"
+                  >
+                    <MenuItem value="all">All Companies</MenuItem>
+                    {companies.map((company) => (
+                      <MenuItem key={company.id} value={company.id}>
+                        {company.name}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={includeInactiveEmployees}
+                      onChange={(e) => setIncludeInactiveEmployees(e.target.checked)}
+                    />
+                  }
+                  label="Include Inactive Employees"
+                />
+                <Typography variant="body2" color="text.secondary">
+                  {(() => {
+                    const filteredEmployees = employees
+                      .filter(employee => selectedCompanyForEmployeeInfo === 'all' || employee.companyId === selectedCompanyForEmployeeInfo)
+                      .filter(employee => includeInactiveEmployees || employee.active);
+
+                    return `Showing ${filteredEmployees.length} employees`;
+                  })()}
+                </Typography>
+              </Box>
+              <Button
+                variant="contained"
+                startIcon={<FileDownload />}
+                onClick={exportEmployeeInfoReport}
+                disabled={exporting}
+              >
+                {exporting ? 'Exporting...' : 'Export Employee Info'}
+              </Button>
+            </Box>
+
+            <TableContainer>
+              <Table>
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Employee</TableCell>
+                    <TableCell>Company</TableCell>
+                    <TableCell>Role</TableCell>
+                    <TableCell>Status</TableCell>
+                    <TableCell align="right">Total Relationships</TableCell>
+                    <TableCell>Clients</TableCell>
+                    <TableCell>Pay Types / Details</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {(() => {
+                    const filteredEmployees = employees
+                      .filter(employee => selectedCompanyForEmployeeInfo === 'all' || employee.companyId === selectedCompanyForEmployeeInfo)
+                      .filter(employee => includeInactiveEmployees || employee.active);
+
+                    if (filteredEmployees.length === 0) {
+                      return (
+                        <TableRow key="employee-info-empty">
+                          <TableCell colSpan={7} align="center">
+                            No employees found for the selected filters.
+                          </TableCell>
+                        </TableRow>
+                      );
+                    }
+
+                    const sortedEmployees = [...filteredEmployees].sort((a, b) => {
+                      const companyA = companies.find(c => c.id === a.companyId)?.name || '';
+                      const companyB = companies.find(c => c.id === b.companyId)?.name || '';
+                      if (companyA !== companyB) {
+                        return companyA.localeCompare(companyB);
+                      }
+                      return a.name.localeCompare(b.name);
+                    });
+
+                    const groupedByCompany = sortedEmployees.reduce<Record<string, typeof sortedEmployees>>((acc, employee) => {
+                      const companyName = companies.find(c => c.id === employee.companyId)?.name || 'Unknown Company';
+                      if (!acc[companyName]) {
+                        acc[companyName] = [];
+                      }
+                      acc[companyName].push(employee);
+                      return acc;
+                    }, {});
+
+                    return Object.entries(groupedByCompany).map(([companyName, group]) => (
+                      <React.Fragment key={`company-group-${companyName}`}>
+                        <TableRow sx={{ backgroundColor: '#e8f4fd' }}>
+                          <TableCell colSpan={7} sx={{ fontWeight: 'bold' }}>
+                            {companyName}
+                          </TableCell>
+                        </TableRow>
+                        {group.map(employee => {
+                          const relationships = (employee.clientPayTypeRelationships || []).map(rel => {
+                            const clientName = clients.find(c => c.id === rel.clientId)?.name || rel.clientName || 'Unknown Client';
+                            const payRate = rel.payRate ? `$${rel.payRate}` : '';
+                            return `${clientName} – ${rel.payType}${payRate ? ` (${payRate})` : ''}`;
+                          });
+                          const uniqueClients = new Set(
+                            (employee.clientPayTypeRelationships || []).map(
+                              rel => clients.find(c => c.id === rel.clientId)?.name || rel.clientName || 'Unknown Client'
+                            )
+                          );
+
+                          return (
+                            <TableRow key={employee.id}>
+                              <TableCell>{employee.name}</TableCell>
+                              <TableCell>{companyName}</TableCell>
+                              <TableCell>{employee.role || employee.position || employee.payType || 'N/A'}</TableCell>
+                              <TableCell>
+                                <Chip
+                                  label={employee.active ? 'Active' : 'Inactive'}
+                                  size="small"
+                                  color={employee.active ? 'success' : 'default'}
+                                  variant={employee.active ? 'filled' : 'outlined'}
+                                />
+                              </TableCell>
+                              <TableCell align="right">{employee.clientPayTypeRelationships?.length || 0}</TableCell>
+                              <TableCell>{Array.from(uniqueClients).join(', ') || 'N/A'}</TableCell>
+                              <TableCell>{relationships.join('; ') || (employee.payType || 'N/A')}</TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </React.Fragment>
+                    ));
                   })()}
                 </TableBody>
               </Table>
@@ -2454,7 +2772,7 @@ const Report: React.FC = () => {
                   
                   // Get relationship-specific data if available
                   let relationshipHours = check.hours || 0;
-                  let relationshipOtHours = check.overtimeHours || 0;
+                  let relationshipOtHours = check.otHours || 0;
                   let relationshipHolidayHours = check.holidayHours || 0;
                   let relationshipPayRate = check.payRate || 0;
                   let relationshipPerdiem = check.perdiemAmount || 0;
@@ -2465,7 +2783,7 @@ const Report: React.FC = () => {
                     ) || check.relationshipDetails[0];
                     
                     relationshipHours = relationship.hours || check.hours || 0;
-                    relationshipOtHours = relationship.otHours || check.overtimeHours || 0;
+                    relationshipOtHours = relationship.otHours || check.otHours || 0;
                     relationshipHolidayHours = relationship.holidayHours || check.holidayHours || 0;
                     relationshipPayRate = relationship.payRate || check.payRate || 0;
                     relationshipPerdiem = relationship.perdiemAmount || check.perdiemAmount || 0;
