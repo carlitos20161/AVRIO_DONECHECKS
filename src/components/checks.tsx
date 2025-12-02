@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   Box,
   Typography,
@@ -25,9 +25,21 @@ import {
   SpeedDialIcon,
   Tooltip,
   Fade,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Popover,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Autocomplete,
 } from "@mui/material";
-import { Add as AddIcon, Delete as DeleteIcon } from "@mui/icons-material";
-import { PDFDocument } from 'pdf-lib';
+import { Add as AddIcon, Delete as DeleteIcon, Print as PrintIcon } from "@mui/icons-material";
+import { PDFDocument, rgb } from 'pdf-lib';
 import { db, auth } from "../firebase";
 import {
   collection,
@@ -115,6 +127,38 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return result;
 }
 
+// Helper to get the ISO week number for a given date
+function getWorkWeekNumber(dateString: string): number | null {
+  if (!dateString) return null;
+  
+  try {
+    const date = createLocalDate(dateString);
+    
+    // ISO 8601 week number calculation
+    // Week 1 is the week that contains January 4th
+    const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    
+    // Set to nearest Thursday: current date + 4 - current day number
+    // Make Sunday's day number 7
+    const dayOfWeek = d.getDay() || 7;
+    d.setDate(d.getDate() + 4 - dayOfWeek);
+    
+    // Get January 4th of the year (always in week 1)
+    const jan4 = new Date(d.getFullYear(), 0, 4);
+    const jan4DayOfWeek = jan4.getDay() || 7;
+    jan4.setDate(jan4.getDate() + 4 - jan4DayOfWeek);
+    
+    // Calculate week number: difference in days divided by 7, plus 1
+    const diffTime = d.getTime() - jan4.getTime();
+    const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+    const weekNumber = Math.floor(diffDays / 7) + 1;
+    
+    return weekNumber;
+  } catch (e) {
+    return null;
+  }
+}
+
 interface BatchChecksProps {
   onChecksCreated?: () => void;
   onGoToSection: (section: string) => void;
@@ -136,17 +180,90 @@ interface FloatingMenuState {
   const [clients, setClients] = useState<Client[]>([]);
   const [currentUserVisibleClientIds, setCurrentUserVisibleClientIds] = useState<string[]>([]);
   const [currentUserRole, setCurrentUserRole] = useState<string>('user');
+  // Load saved data from localStorage on mount
+  const loadSavedData = () => {
+    try {
+      const savedTabData = localStorage.getItem('batchChecks_tabData');
+      const savedCompanyId = localStorage.getItem('batchChecks_companyId');
+      const savedClientId = localStorage.getItem('batchChecks_clientId');
+      const savedDefaultDate = localStorage.getItem('batchChecks_defaultDate');
+      const savedShowReviewPanel = localStorage.getItem('batchChecks_showReviewPanel');
+      
+      let parsedTabData: { [key: string]: any } = {};
+      if (savedTabData) {
+        try {
+          parsedTabData = JSON.parse(savedTabData);
+          
+          // Convert date strings back to Date objects
+          Object.keys(parsedTabData).forEach(tabId => {
+            const tab: any = parsedTabData[tabId];
+            if (tab && tab.inputs) {
+              Object.keys(tab.inputs).forEach((empId: string) => {
+                const input: any = tab.inputs[empId];
+                if (input.checkDate && typeof input.checkDate === 'string') {
+                  try {
+                    input.checkDate = createLocalDate(input.checkDate);
+                  } catch (e) {
+                    // If date parsing fails, set to null
+                    input.checkDate = null;
+                  }
+                } else if (input.checkDate === null || input.checkDate === undefined) {
+                  input.checkDate = null;
+                }
+              });
+            }
+          });
+        } catch (parseError) {
+          console.error('Error parsing saved tabData:', parseError);
+          parsedTabData = {};
+        }
+      }
+      
+      // Always return an object with all saved values, even if some are null/empty
+      const result = {
+        tabData: parsedTabData,
+        companyId: savedCompanyId,
+        clientId: savedClientId || 'multiple',
+        defaultDate: savedDefaultDate || '',
+        showReviewPanel: savedShowReviewPanel === 'true'
+      };
+      
+      console.log('📦 [Load Saved Data] Loaded from localStorage:', {
+        hasTabData: Object.keys(parsedTabData).length > 0,
+        tabDataKeys: Object.keys(parsedTabData),
+        companyId: savedCompanyId,
+        clientId: result.clientId,
+        showReviewPanel: result.showReviewPanel
+      });
+      
+      return result;
+    } catch (error) {
+      console.error('Error loading saved data:', error);
+      // Return empty object instead of null so we can still access properties
+      return {
+        tabData: {},
+        companyId: null,
+        clientId: 'multiple',
+        defaultDate: '',
+        showReviewPanel: false
+      };
+    }
+  };
+
+  const savedData = loadSavedData();
+  
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(
-    null
+    savedData?.companyId || null
   );
-  const [selectedClientId, setSelectedClientId] = useState<string>('multiple');
+  const [selectedClientId, setSelectedClientId] = useState<string>(savedData?.clientId || 'multiple');
   // Separate state for the default check date (independent of individual employee dates)
-  const [defaultCheckDate, setDefaultCheckDate] = useState<string>('');
+  const [defaultCheckDate, setDefaultCheckDate] = useState<string>(savedData?.defaultDate || '');
+  
   useEffect(() => {
     console.log('🔍 DEBUG: selectedClientId changed to:', selectedClientId);
   }, [selectedClientId]);
 
-  // Initialize default check date with today's date
+  // Initialize default check date with today's date if not saved
   useEffect(() => {
     if (!defaultCheckDate) {
       const today = new Date();
@@ -154,13 +271,117 @@ interface FloatingMenuState {
       setDefaultCheckDate(todayString);
     }
   }, [defaultCheckDate]);
+  
   // Store data per client tab to prevent loss when switching tabs
   const [tabData, setTabData] = useState<{
     [tabId: string]: {
       selectedEmployees: { [id: string]: boolean };
       inputs: { [id: string]: PayInput };
     };
-  }>({});
+  }>(savedData?.tabData || {});
+  
+  // Ensure tabData is restored from localStorage if it's empty but localStorage has data
+  // This is a safety net in case the initial state wasn't set correctly
+  useEffect(() => {
+    if (Object.keys(tabData).length === 0) {
+      try {
+        const savedTabData = localStorage.getItem('batchChecks_tabData');
+        if (savedTabData) {
+          const parsed = JSON.parse(savedTabData);
+          if (Object.keys(parsed).length > 0) {
+            // Convert date strings back to Date objects
+            Object.keys(parsed).forEach(tabId => {
+              const tab: any = parsed[tabId];
+              if (tab && tab.inputs) {
+                Object.keys(tab.inputs).forEach((empId: string) => {
+                  const input: any = tab.inputs[empId];
+                  if (input.checkDate && typeof input.checkDate === 'string') {
+                    try {
+                      input.checkDate = createLocalDate(input.checkDate);
+                    } catch (e) {
+                      input.checkDate = null;
+                    }
+                  } else if (input.checkDate === null || input.checkDate === undefined) {
+                    input.checkDate = null;
+                  }
+                });
+              }
+            });
+            console.log('🔄 [TabData Restore] Restoring tabData from localStorage', {
+              tabDataKeys: Object.keys(parsed)
+            });
+            setTabData(parsed);
+          }
+        }
+      } catch (error) {
+        console.error('Error restoring tabData from localStorage:', error);
+      }
+    }
+  }, []); // Only run once on mount
+  
+  // Save to localStorage whenever tabData changes
+  useEffect(() => {
+    try {
+      // Convert Date objects to ISO strings for serialization
+      const serializableTabData: any = {};
+      Object.keys(tabData).forEach(tabId => {
+        const tab = tabData[tabId];
+        serializableTabData[tabId] = {
+          selectedEmployees: tab.selectedEmployees,
+          inputs: {}
+        };
+        
+        if (tab.inputs) {
+          Object.keys(tab.inputs).forEach(empId => {
+            const input = tab.inputs[empId];
+            const serializableInput: any = { ...input };
+            
+            // Convert Date to ISO string
+            if (input.checkDate instanceof Date) {
+              serializableInput.checkDate = input.checkDate.toISOString().split('T')[0];
+            }
+            
+            serializableTabData[tabId].inputs[empId] = serializableInput;
+          });
+        }
+      });
+      
+      localStorage.setItem('batchChecks_tabData', JSON.stringify(serializableTabData));
+    } catch (error) {
+      console.error('Error saving tabData:', error);
+    }
+  }, [tabData]);
+  
+  // Save selectedCompanyId to localStorage
+  useEffect(() => {
+    if (selectedCompanyId) {
+      localStorage.setItem('batchChecks_companyId', selectedCompanyId);
+    } else {
+      localStorage.removeItem('batchChecks_companyId');
+    }
+  }, [selectedCompanyId]);
+  
+  // Save selectedClientId to localStorage
+  useEffect(() => {
+    localStorage.setItem('batchChecks_clientId', selectedClientId);
+  }, [selectedClientId]);
+  
+  // Save defaultCheckDate to localStorage
+  useEffect(() => {
+    if (defaultCheckDate) {
+      localStorage.setItem('batchChecks_defaultDate', defaultCheckDate);
+    }
+  }, [defaultCheckDate]);
+
+  // Clear all saved data (call this when checks are successfully created)
+  const clearSavedData = () => {
+    localStorage.removeItem('batchChecks_tabData');
+    localStorage.removeItem('batchChecks_companyId');
+    localStorage.removeItem('batchChecks_clientId');
+    localStorage.removeItem('batchChecks_defaultDate');
+    localStorage.removeItem('batchChecks_showReviewPanel');
+    setShowReviewPanel(false); // Also close the review panel
+  };
 
   // Add this function after your other utility functions
 const mergePDFs = async (pdfBlobs: Blob[]) => {
@@ -257,7 +478,21 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
     </Button>
   </Box>
 )}
-  const [showReviewPanel, setShowReviewPanel] = useState(false);
+  const [showReviewPanel, setShowReviewPanel] = useState(savedData?.showReviewPanel || false);
+  const [selectedClientTab, setSelectedClientTab] = useState<string | null>(null);
+  const [selectedEmployeeTab, setSelectedEmployeeTab] = useState<string | null>(null);
+  const [dropdownSelectedEmployees, setDropdownSelectedEmployees] = useState<string[]>([]);
+  const [otherPayDialogOpen, setOtherPayDialogOpen] = useState<string | null>(null);
+  
+  // Save showReviewPanel to localStorage
+  useEffect(() => {
+    if (showReviewPanel) {
+      localStorage.setItem('batchChecks_showReviewPanel', 'true');
+    } else {
+      localStorage.removeItem('batchChecks_showReviewPanel');
+    }
+  }, [showReviewPanel]);
+  
   const [reviewData, setReviewData] = useState<Array<{
     employee: Employee;
     input: PayInput;
@@ -266,8 +501,10 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
     perDiemTotal: number;
     clientsWorked?: string[];
     clientBreakdown?: Array<{
+      clientId: string;
       clientName: string;
       companyName: string;
+      division?: string;
       amount: number;
       hourlyAmount: number;
       perDiemAmount: number;
@@ -277,6 +514,7 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
   }>>([]);
   const [clientSearchTerm, setClientSearchTerm] = useState<string>("");
   const [clientStatusFilter, setClientStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const hasRestoredReviewRef = useRef(false);
   
   // Employee search
   const [employeeSearchTerm, setEmployeeSearchTerm] = useState<string>("");
@@ -368,7 +606,7 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
       if (role === 'admin') {
       const empSnap = await getDocs(collection(db, "employees"));
         empDocs = empSnap.docs;
-        console.log("[BatchChecks] (admin) fetched employees:", empDocs.map(d => ({ id: d.id, ...d.data() })));
+        console.log("[BatchChecks] (admin) fetched employees:", empDocs.filter(d => d != null).map(d => ({ id: d.id, ...d.data() })));
       } else {
         const queries = companyIds.map((id) =>
           getDocs(query(collection(db, "employees"), where("companyId", "==", id)))
@@ -376,13 +614,14 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
         const results = await Promise.allSettled(queries);
         empDocs = results
           .filter((r) => r.status === "fulfilled")
-          .flatMap((r) => (r as PromiseFulfilledResult<any>).value.docs);
+          .flatMap((r) => (r as PromiseFulfilledResult<any>).value.docs)
+          .filter((d) => d != null);
         results
           .filter((r) => r.status === "rejected")
           .forEach((r) => console.warn("🔥 Failed employee query:", (r as PromiseRejectedResult).reason));
-        console.log("[BatchChecks] (user) fetched employees:", empDocs.map(d => ({ id: d.id, ...d.data() })));
+        console.log("[BatchChecks] (user) fetched employees:", empDocs.filter(d => d != null).map(d => ({ id: d.id, ...d.data() })));
       }
-      setEmployees(empDocs.map((d) => ({ id: d.id, ...d.data() } as Employee)));
+      setEmployees(empDocs.filter(d => d != null).map((d) => ({ id: d.id, ...d.data() } as Employee)));
 
       // Fetch clients
       const clientSnap = await getDocs(collection(db, "clients"));
@@ -403,6 +642,9 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
   // Get clients for the selected company
   const companyClients = selectedCompanyId 
     ? clients.filter(client => {
+        // Safety check: skip undefined/null clients
+        if (!client) return false;
+        
         // Basic filters
         const isActive = client.active;
         const belongsToCompany = client.companyIds && client.companyIds.includes(selectedCompanyId);
@@ -428,7 +670,7 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
   // Log visible clients for debugging
   useEffect(() => {
     if (companyClients.length > 0) {
-      console.log('[BatchChecks] Visible clients after filtering:', companyClients.map(c => ({
+      console.log('[BatchChecks] Visible clients after filtering:', companyClients.filter(c => c != null).map(c => ({
         id: c.id,
         name: c.name,
         visible: true
@@ -509,11 +751,47 @@ const mergePDFs = async (pdfBlobs: Blob[]) => {
     }
   }, [employees, clientsWithActiveEmployees]);
 
- // Clear all tab data when company changes
+ // Clear all tab data when company changes (but not on initial load with saved data)
+  const isInitialMount = useRef(true);
+  const previousCompanyIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    // On initial mount, store the initial companyId and don't clear tabData
+    if (isInitialMount.current) {
+      previousCompanyIdRef.current = selectedCompanyId;
+      isInitialMount.current = false;
+      return;
+    }
+    
+    // Only clear tabData if:
+    // 1. Company actually changed (not just initialized)
+    // 2. Previous company was not null (meaning it was a real change, not initial load)
+    // 3. New company is different from previous
+    if (previousCompanyIdRef.current !== null && 
+        previousCompanyIdRef.current !== selectedCompanyId &&
+        selectedCompanyId !== null) {
+      console.log('🔄 [Company Change] Clearing tabData due to company change', {
+        previous: previousCompanyIdRef.current,
+        current: selectedCompanyId
+      });
+      setTabData({});
+    }
+    
+    // Update the ref for next comparison
+    previousCompanyIdRef.current = selectedCompanyId;
+  }, [selectedCompanyId]);
+
+// Auto-select first employee tab when employees are selected
 useEffect(() => {
-  setTabData({});
-  // Don't reset selectedClientId here - let the company click handler set it properly
-}, [selectedCompanyId]);
+  const selectedEmpIds = Object.keys(selectedEmployees).filter(id => selectedEmployees[id]);
+  if (selectedEmpIds.length > 0 && !selectedEmployeeTab) {
+    setSelectedEmployeeTab(selectedEmpIds[0]);
+  } else if (selectedEmpIds.length === 0) {
+    setSelectedEmployeeTab(null);
+  } else if (selectedEmployeeTab && !selectedEmployees[selectedEmployeeTab]) {
+    // If current tab employee was removed, switch to first available
+    setSelectedEmployeeTab(selectedEmpIds[0] || null);
+  }
+}, [selectedEmployees, selectedEmployeeTab]);
 
   // Don't clear selections when switching client tabs - let users keep their work
 
@@ -588,9 +866,9 @@ useEffect(() => {
     if (selectedClientId) {
       // Auto-select ALL relationships for the current client (an employee might have multiple pay types with same client)
       const clientRelationships = emp.clientPayTypeRelationships?.filter(rel => 
-        rel.clientId === selectedClientId && rel.active
+        rel != null && rel.clientId === selectedClientId && rel.active
       ) || [];
-      return clientRelationships.map(rel => rel.id);
+      return clientRelationships.filter(rel => rel != null).map(rel => rel.id);
     }
     // Default fallback
     return [];
@@ -614,7 +892,7 @@ useEffect(() => {
       );
       
       const checksSnapshot = await getDocs(checksQuery);
-      const allChecks = checksSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      const allChecks = checksSnapshot.docs.filter(doc => doc != null).map(doc => ({ id: doc.id, ...doc.data() } as any));
       
       console.log("🔍 Found total checks:", allChecks.length);
       
@@ -1005,7 +1283,7 @@ const clientEmployees = filteredEmployees.filter(emp => {
         return parseFloat(relationship.payRate);
       }
     }
-    return emp.payRate || 0;
+    return 0; // No fallback - must use relationship-specific pay rates
   };
 
   // Helper function to get the pay rate for a specific relationship
@@ -1015,13 +1293,12 @@ const clientEmployees = filteredEmployees.filter(emp => {
       employeeName: emp.name,
       relationshipId,
       relationship,
-      relationshipPayRate: relationship?.payRate,
-      empDefaultPayRate: emp.payRate
+      relationshipPayRate: relationship?.payRate
     });
     if (relationship?.payRate) {
       return parseFloat(relationship.payRate);
     }
-    return emp.payRate || 0;
+    return 0; // No fallback - must use relationship-specific pay rates
   };
 
   const calculateAmount = (emp: Employee, data: PayInput) => {
@@ -1068,7 +1345,7 @@ const clientEmployees = filteredEmployees.filter(emp => {
           } else if (relationship.payType === 'hourly') {
             // For hourly relationships, look for relationship-specific data
             const relationshipId = relationship.id;
-            const baseRate = relationship.payRate ? parseFloat(relationship.payRate) : (emp.payRate || 0);
+            const baseRate = relationship.payRate ? parseFloat(relationship.payRate) : 0;
             const hours = parseFloat(data[`${relationshipId}_hours`] || '0');
             const otHours = parseFloat(data[`${relationshipId}_otHours`] || '0');
             const holidayHours = parseFloat(data[`${relationshipId}_holidayHours`] || '0');
@@ -1330,7 +1607,7 @@ const clientEmployees = filteredEmployees.filter(emp => {
       console.log("🔍 DEBUG: Bank query result:", {
         empty: banksSnapshot.empty,
         size: banksSnapshot.size,
-        docs: banksSnapshot.docs.map(doc => ({ id: doc.id, data: doc.data() }))
+        docs: banksSnapshot.docs.filter(doc => doc != null).map(doc => ({ id: doc.id, data: doc.data() }))
       });
       
       if (banksSnapshot.empty) {
@@ -1400,7 +1677,7 @@ const clientEmployees = filteredEmployees.filter(emp => {
                   clientId: rel.clientId,
                   clientName: clientNameForCheck, // Use current client name for new checks
                   payType: rel.payType,
-                  payRate: rel.payRate ? parseFloat(rel.payRate) : (emp.payRate || 0)
+                  payRate: rel.payRate ? parseFloat(rel.payRate) : 0
                 };
                 
                 // Add relationship-specific hours if available
@@ -1468,7 +1745,7 @@ const clientEmployees = filteredEmployees.filter(emp => {
         for (const rel of relationshipDetails) {
           if (rel.payType === 'hourly') {
             // Use relationship-specific pay rate for this relationship's hours
-            const relPayRate = rel.payRate || emp.payRate || 0;
+            const relPayRate = rel.payRate || 0;
             const relHours = rel.hours || 0;
             const relOtHours = rel.otHours || 0;
             const relHolidayHours = rel.holidayHours || 0;
@@ -1527,7 +1804,7 @@ const clientEmployees = filteredEmployees.filter(emp => {
           relationshipDetails: relationshipDetails,
           clientId: clientId,
           payType: payType,
-          payRate: emp.payRate?.toString() || '',
+          payRate: relationshipDetails.find(r => r.payType === 'hourly')?.payRate?.toString() || '',
           weekKey: weekKey,
           workWeek: getISOWeek(checkDate).toString(),
           date: checkDate.toISOString().split('T')[0],
@@ -1627,6 +1904,9 @@ const clientEmployees = filteredEmployees.filter(emp => {
       console.log("🔍 DEBUG: Clearing all tab data (selections and inputs) to start fresh");
       setTabData({});
       
+      // Clear saved data from localStorage since checks were successfully created
+      clearSavedData();
+      
       // Show floating menu with navigation options
       const company = companies.find(c => c.id === selectedCompanyId);
       const client = createdChecks[0]?.clientId && createdChecks[0].clientId !== 'multiple' 
@@ -1691,7 +1971,7 @@ const clientEmployees = filteredEmployees.filter(emp => {
     }
 
     console.log(`🔍 [Review] selectedClientId: ${selectedClientId}`);
-    console.log(`🔍 [Review] companyClients:`, companyClients.map(c => ({ id: c.id, name: c.name })));
+    console.log(`🔍 [Review] companyClients:`, companyClients.filter(c => c != null).map(c => ({ id: c.id, name: c.name })));
     console.log(`🔍 [Review] tabData:`, tabData);
 
     // Aggregate employees from ALL tabs
@@ -1721,8 +2001,10 @@ const clientEmployees = filteredEmployees.filter(emp => {
       let perDiemTotal = 0;
       const clientsWorked: string[] = [];
       const clientBreakdown: Array<{
+        clientId: string;
         clientName: string;
         companyName: string;
+        division?: string;
         amount: number;
         hourlyAmount: number;
         perDiemAmount: number;
@@ -1805,8 +2087,10 @@ const clientEmployees = filteredEmployees.filter(emp => {
               }
               
               clientBreakdown.push({
+                clientId: client.id,
                 clientName: client.name,
                 companyName: company?.name || 'Unknown',
+                division: client.division || undefined,
                 amount: tabAmount,
                 hourlyAmount: tabHourly,
                 perDiemAmount: tabPerDiem,
@@ -1847,8 +2131,459 @@ const clientEmployees = filteredEmployees.filter(emp => {
     setShowReviewPanel(true);
   };
 
+  // Recalculate review data when review panel is restored from localStorage
+  // This ensures the review panel shows correctly after a page refresh
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    // Only recalculate if:
+    // 1. Review panel should be shown (restored from localStorage)
+    // 2. We have tabData with selected employees or input data
+    // 3. Employees and clients are loaded
+    // 4. We haven't already restored (prevent infinite loops)
+    if (showReviewPanel && 
+        !hasRestoredReviewRef.current &&
+        Object.keys(tabData).length > 0 && 
+        employees.length > 0 && 
+        companyClients.length > 0 &&
+        selectedCompanyId) {
+      
+      // Check if we have any selected employees OR input data
+      const hasData = Object.values(tabData).some(tab => {
+        const hasSelectedEmployees = Object.keys(tab.selectedEmployees || {}).some(id => tab.selectedEmployees[id]);
+        const hasInputData = Object.keys(tab.inputs || {}).length > 0;
+        return hasSelectedEmployees || hasInputData;
+      });
+      
+      if (hasData && reviewData.length === 0) {
+        console.log('🔄 [Review Restore] Recalculating review data after page refresh', {
+          tabDataKeys: Object.keys(tabData),
+          employeesCount: employees.length,
+          clientsCount: companyClients.length,
+          selectedCompanyId,
+          hasData
+        });
+        hasRestoredReviewRef.current = true;
+        // Use a small delay to ensure all state is ready
+        const timer = setTimeout(() => {
+          reviewChecks();
+        }, 200);
+        return () => clearTimeout(timer);
+      } else {
+        console.log('🔄 [Review Restore] Conditions not met:', {
+          showReviewPanel,
+          hasRestored: hasRestoredReviewRef.current,
+          hasTabData: Object.keys(tabData).length > 0,
+          hasEmployees: employees.length > 0,
+          hasClients: companyClients.length > 0,
+          hasSelectedCompany: !!selectedCompanyId,
+          hasData,
+          reviewDataLength: reviewData.length
+        });
+      }
+    }
+    
+    // Reset the ref when review panel is closed
+    if (!showReviewPanel) {
+      hasRestoredReviewRef.current = false;
+    }
+  }, [showReviewPanel, tabData, employees.length, companyClients.length, selectedCompanyId, reviewData.length]);
+
+  const generateReviewPDF = async () => {
+    if (reviewData.length === 0) {
+      alert("No review data available to print.");
+      return;
+    }
+
+    try {
+      const pdfDoc = await PDFDocument.create();
+      const page = pdfDoc.addPage([612, 792]); // US Letter size
+      const { width, height } = page.getSize();
+      
+      // Font setup
+      const font = await pdfDoc.embedFont('Helvetica');
+      const boldFont = await pdfDoc.embedFont('Helvetica-Bold');
+      
+      let yPosition = height - 50;
+      const margin = 50;
+      const lineHeight = 14;
+      const sectionSpacing = 20;
+      
+      // Helper function to add text with word wrapping
+      const addText = (text: string, x: number, y: number, size: number, isBold: boolean = false, maxWidth?: number, targetPage = page) => {
+        const fontToUse = isBold ? boldFont : font;
+        if (maxWidth) {
+          // Simple word wrapping
+          const words = text.split(' ');
+          let line = '';
+          let currentY = y;
+          for (const word of words) {
+            const testLine = line + (line ? ' ' : '') + word;
+            const textWidth = fontToUse.widthOfTextAtSize(testLine, size);
+            if (textWidth > maxWidth && line) {
+              targetPage.drawText(line, { x, y: currentY, size, font: fontToUse });
+              line = word;
+              currentY -= size + 2;
+            } else {
+              line = testLine;
+            }
+          }
+          if (line) {
+            targetPage.drawText(line, { x, y: currentY, size, font: fontToUse });
+          }
+          return currentY;
+        } else {
+          targetPage.drawText(text, { x, y, size, font: fontToUse });
+          return y;
+        }
+      };
+      
+      // Header
+      let currentPage = page;
+      const companyName = companies.find(c => c.id === selectedCompanyId)?.name || 'Unknown Company';
+      addText('Payroll Checks Review', margin, yPosition, 18, true, undefined, currentPage);
+      yPosition -= 25;
+      addText(`Company: ${companyName}`, margin, yPosition, 12, false, undefined, currentPage);
+      yPosition -= 15;
+      addText(`Generated: ${new Date().toLocaleString()}`, margin, yPosition, 10, false, undefined, currentPage);
+      yPosition -= sectionSpacing * 2;
+      
+      // Get all unique clients
+      const allClientsMap = new Map<string, { clientId: string; clientName: string; division?: string }>();
+      reviewData.forEach(item => {
+        if (item.clientBreakdown) {
+          item.clientBreakdown.forEach(breakdown => {
+            const uniqueKey = breakdown.clientId;
+            if (!allClientsMap.has(uniqueKey)) {
+              allClientsMap.set(uniqueKey, {
+                clientId: breakdown.clientId,
+                clientName: breakdown.clientName,
+                division: breakdown.division
+              });
+            }
+          });
+        }
+      });
+      
+      const clientList = Array.from(allClientsMap.keys());
+      const clientTotals = clientList.map(uniqueKey => {
+        const clientInfo = allClientsMap.get(uniqueKey)!;
+        const total = reviewData.reduce((sum, item) => {
+          const breakdown = item.clientBreakdown?.find(b => b.clientId === uniqueKey);
+          return sum + (breakdown?.amount || 0);
+        }, 0);
+        const displayName = clientInfo.division && clientInfo.division.trim()
+          ? `${clientInfo.clientName} (${clientInfo.division})`
+          : clientInfo.clientName;
+        return { 
+          uniqueKey,
+          clientId: clientInfo.clientId,
+          clientName: clientInfo.clientName,
+          division: clientInfo.division,
+          displayName,
+          total 
+        };
+      }).sort((a, b) => a.displayName.localeCompare(b.displayName));
+      
+      // Sort clientList to match the sorted clientTotals order
+      const sortedClientList = clientTotals.map(item => item.uniqueKey);
+      
+      // Summary by Client/Department
+      addText('Summary by Client/Department', margin, yPosition, 14, true, undefined, currentPage);
+      yPosition -= 20;
+      
+      // Table header
+      addText('Client/Department', margin, yPosition, 10, true, undefined, currentPage);
+      addText('Total Amount', width - margin - 150, yPosition, 10, true, undefined, currentPage);
+      addText('Employees', width - margin - 50, yPosition, 10, true, undefined, currentPage);
+      yPosition -= 15;
+      
+      // Draw line
+      currentPage.drawLine({
+        start: { x: margin, y: yPosition },
+        end: { x: width - margin, y: yPosition },
+        thickness: 1,
+        color: rgb(0, 0, 0)
+      });
+      yPosition -= 10;
+      
+      // Client totals
+      clientTotals.forEach(({ uniqueKey, displayName, total }) => {
+        if (yPosition < 100) {
+          // New page
+          currentPage = pdfDoc.addPage([612, 792]);
+          yPosition = height - 50;
+        }
+        
+        const employeeCount = reviewData.filter(item => 
+          item.clientBreakdown?.some(b => b.clientId === uniqueKey)
+        ).length;
+        
+        addText(displayName, margin, yPosition, 10, false, undefined, currentPage);
+        addText(`$${total.toFixed(2)}`, width - margin - 150, yPosition, 10, false, undefined, currentPage);
+        addText(`${employeeCount}`, width - margin - 50, yPosition, 10, false, undefined, currentPage);
+        yPosition -= 15;
+      });
+      
+      // Grand Total
+      yPosition -= 5;
+      currentPage.drawLine({
+        start: { x: margin, y: yPosition },
+        end: { x: width - margin, y: yPosition },
+        thickness: 1,
+        color: rgb(0, 0, 0)
+      });
+      yPosition -= 10;
+      
+      const grandTotal = reviewData.reduce((sum, item) => sum + item.calculatedAmount, 0);
+      addText('GRAND TOTAL', margin, yPosition, 12, true, undefined, currentPage);
+      addText(`$${grandTotal.toFixed(2)}`, width - margin - 150, yPosition, 12, true, undefined, currentPage);
+      addText(`${reviewData.length}`, width - margin - 50, yPosition, 12, true, undefined, currentPage);
+      
+      // Employee Breakdown for each client - each client gets its own page (starting after summary)
+      sortedClientList.forEach((uniqueKey, index) => {
+        // Always start each client on a new page
+        currentPage = pdfDoc.addPage([612, 792]);
+        yPosition = height - 50;
+        
+        const clientInfo = allClientsMap.get(uniqueKey)!;
+        const displayName = clientInfo.division && clientInfo.division.trim()
+          ? `${clientInfo.clientName} (${clientInfo.division})`
+          : clientInfo.clientName;
+        
+        addText(`Employee Breakdown: ${displayName}`, margin, yPosition, 14, true, undefined, currentPage);
+        yPosition -= 20;
+        
+        const employeesForClient = reviewData.filter(item => {
+          return item.clientBreakdown?.some(b => b.clientId === uniqueKey);
+        });
+        
+        // Table header - INDIVIDUAL CHECKS format
+        // Column widths optimized to prevent overlap: Employee, Hr, OT, H/D, $Hr, $OT, $H/D, Other, Per Diem, Amount
+        const colWidths = [90, 30, 30, 30, 50, 50, 50, 50, 60, 60]; // Total: 500px (fits in 512px available width)
+        let xPos = margin;
+        const headers = ['Employee', 'Hr', 'OT', 'H/D', '$Hr', '$OT', '$H/D', 'Other', 'Per Diem', 'Amount'];
+        headers.forEach((header, idx) => {
+          if (idx === 0) {
+            // Employee - left aligned
+            addText(header, xPos, yPosition, 9, true, undefined, currentPage);
+          } else if (idx === headers.length - 1) {
+            // Amount - right aligned
+            addText(header, xPos + colWidths[idx] - 5, yPosition, 9, true, undefined, currentPage);
+          } else {
+            // Numeric columns - right aligned
+            addText(header, xPos + colWidths[idx] - 3, yPosition, 9, true, undefined, currentPage);
+          }
+          xPos += colWidths[idx];
+        });
+        yPosition -= 15;
+        
+        // Draw line
+        currentPage.drawLine({
+          start: { x: margin, y: yPosition },
+          end: { x: margin + colWidths.reduce((a, b) => a + b, 0), y: yPosition },
+          thickness: 1,
+          color: rgb(0, 0, 0)
+        });
+        yPosition -= 10;
+        
+        employeesForClient.forEach(item => {
+          if (yPosition < 100) {
+            currentPage = pdfDoc.addPage([612, 792]);
+            yPosition = height - 50;
+            // Re-add headers
+            xPos = margin;
+            headers.forEach((header, idx) => {
+              if (idx === 0) {
+                // Employee - left aligned
+                addText(header, xPos, yPosition, 9, true, undefined, currentPage);
+              } else if (idx === headers.length - 1) {
+                // Amount - right aligned
+                addText(header, xPos + colWidths[idx] - 5, yPosition, 9, true, undefined, currentPage);
+              } else {
+                // Numeric columns - right aligned
+                addText(header, xPos + colWidths[idx] - 3, yPosition, 9, true, undefined, currentPage);
+              }
+              xPos += colWidths[idx];
+            });
+            yPosition -= 15;
+            currentPage.drawLine({
+              start: { x: margin, y: yPosition },
+              end: { x: margin + colWidths.reduce((a, b) => a + b, 0), y: yPosition },
+              thickness: 1,
+              color: rgb(0, 0, 0)
+            });
+            yPosition -= 10;
+          }
+          
+          const breakdown = item.clientBreakdown?.find(b => b.clientId === uniqueKey);
+          if (!breakdown) return;
+          
+          // Parse details to extract values
+          let hours = 0;
+          let otHours = 0;
+          let holidayHours = 0;
+          let hourlyAmount = 0;
+          let otAmount = 0;
+          let holidayAmount = 0;
+          let otherPay = 0;
+          let perDiem = 0;
+          let checkDate = '';
+
+          if (breakdown.details && breakdown.details.length > 0) {
+            breakdown.details.forEach((detail) => {
+              const label = detail.label.toLowerCase();
+              const value = detail.value;
+              
+              // Extract regular hours
+              if (label.includes('hrs') && !label.includes('ot') && !label.includes('holiday')) {
+                const hrsMatch = detail.label.match(/(\d+(?:\.\d+)?)\s*hrs/i);
+                if (hrsMatch) hours = parseFloat(hrsMatch[1]);
+                const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                if (amountMatch) hourlyAmount = parseFloat(amountMatch[1].replace(/,/g, ''));
+              }
+              
+              // Extract OT hours
+              if (label.includes('ot') && !label.includes('holiday')) {
+                const otMatch = detail.label.match(/(\d+(?:\.\d+)?)\s*ot/i);
+                if (otMatch) otHours = parseFloat(otMatch[1]);
+                const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                if (amountMatch) otAmount = parseFloat(amountMatch[1].replace(/,/g, ''));
+              }
+              
+              // Extract Holiday hours
+              if (label.includes('holiday')) {
+                const holidayMatch = detail.label.match(/(\d+(?:\.\d+)?)\s*holiday/i);
+                if (holidayMatch) holidayHours = parseFloat(holidayMatch[1]);
+                const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                if (amountMatch) holidayAmount = parseFloat(amountMatch[1].replace(/,/g, ''));
+              }
+              
+              // Extract Per Diem
+              if (label.includes('per diem')) {
+                const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                if (amountMatch) perDiem += parseFloat(amountMatch[1].replace(/,/g, ''));
+              }
+              
+              // Extract Other Pay
+              if (!label.includes('hrs') && !label.includes('ot') && !label.includes('holiday') && 
+                  !label.includes('per diem') && !['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].includes(label.trim()) &&
+                  value.includes('$')) {
+                const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                if (amountMatch) otherPay += parseFloat(amountMatch[1].replace(/,/g, ''));
+              }
+              
+              // Check for day names (per diem breakdown)
+              const dayNames = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+              if (dayNames.includes(label.trim()) && value.includes('$')) {
+                const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                if (amountMatch) perDiem += parseFloat(amountMatch[1].replace(/,/g, ''));
+              }
+            });
+          }
+
+          // Get check date from tabData
+          const tabId = uniqueKey;
+          const tabInfo = tabData[tabId];
+          const inputData = tabInfo?.inputs[item.employee.id];
+          
+          if (inputData?.checkDate) {
+            const date = new Date(inputData.checkDate);
+            checkDate = `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`;
+          }
+          
+          // Print row data with proper alignment
+          xPos = margin;
+          
+          // Employee - left aligned
+          addText(item.employee.name, xPos, yPosition, 9, false, undefined, currentPage);
+          xPos += colWidths[0];
+          
+          // Hr - right aligned
+          addText(hours > 0 ? hours.toFixed(1) : '0.0', xPos + colWidths[1] - 3, yPosition, 9, false, undefined, currentPage);
+          xPos += colWidths[1];
+          
+          // OT - right aligned
+          addText(otHours > 0 ? otHours.toFixed(1) : '0.0', xPos + colWidths[2] - 3, yPosition, 9, false, undefined, currentPage);
+          xPos += colWidths[2];
+          
+          // H/D - right aligned
+          addText(holidayHours > 0 ? holidayHours.toFixed(1) : '0.0', xPos + colWidths[3] - 3, yPosition, 9, false, undefined, currentPage);
+          xPos += colWidths[3];
+          
+          // $Hr - right aligned
+          addText(hourlyAmount > 0 ? `$${hourlyAmount.toFixed(2)}` : '-', xPos + colWidths[4] - 3, yPosition, 9, false, undefined, currentPage);
+          xPos += colWidths[4];
+          
+          // $OT - right aligned
+          addText(otAmount > 0 ? `$${otAmount.toFixed(2)}` : '-', xPos + colWidths[5] - 3, yPosition, 9, false, undefined, currentPage);
+          xPos += colWidths[5];
+          
+          // $H/D - right aligned
+          addText(holidayAmount > 0 ? `$${holidayAmount.toFixed(2)}` : '-', xPos + colWidths[6] - 3, yPosition, 9, false, undefined, currentPage);
+          xPos += colWidths[6];
+          
+          // Other - right aligned
+          addText(otherPay > 0 ? `$${otherPay.toFixed(2)}` : '-', xPos + colWidths[7] - 3, yPosition, 9, false, undefined, currentPage);
+          xPos += colWidths[7];
+          
+          // Per Diem - right aligned
+          addText(perDiem > 0 ? `$${perDiem.toFixed(2)}` : '-', xPos + colWidths[8] - 3, yPosition, 9, false, undefined, currentPage);
+          xPos += colWidths[8];
+          
+          // Amount - right aligned (bold)
+          addText(`$${breakdown.amount.toFixed(2)}`, xPos + colWidths[9] - 5, yPosition, 9, true, undefined, currentPage);
+          
+          yPosition -= 15;
+        });
+        
+        // Subtotal
+        yPosition -= 5;
+        const totalWidth = colWidths.reduce((a, b) => a + b, 0);
+        currentPage.drawLine({
+          start: { x: margin, y: yPosition },
+          end: { x: margin + totalWidth, y: yPosition },
+          thickness: 1,
+          color: rgb(0, 0, 0)
+        });
+        yPosition -= 10;
+        
+        const subtotal = employeesForClient.reduce((sum, item) => {
+          const breakdown = item.clientBreakdown?.find(b => b.clientId === uniqueKey);
+          return sum + (breakdown?.amount || 0);
+        }, 0);
+        
+        // Subtotal spans first 9 columns, Amount in last column (right aligned)
+        addText(`Subtotal for ${displayName}`, margin, yPosition, 10, true, undefined, currentPage);
+        const amountXPos = margin + colWidths.slice(0, 9).reduce((a, b) => a + b, 0);
+        addText(`$${subtotal.toFixed(2)}`, amountXPos + colWidths[9] - 5, yPosition, 10, true, undefined, currentPage);
+        yPosition -= sectionSpacing * 2;
+      });
+      
+      // Generate PDF and download
+      const pdfBytes = await pdfDoc.save();
+      const blob = new Blob([pdfBytes as any], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `Payroll_Review_${companyName.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      
+    } catch (error) {
+      console.error('Error generating PDF:', error);
+      alert('Error generating PDF. Please try again.');
+    }
+  };
+
   return (
-    <Box sx={{ p: 3 }}>
+    <Box sx={{ 
+      p: 3, 
+      width: '100%',
+      maxWidth: '100%',
+      px: 3
+    }}>
       <Typography variant="h4" gutterBottom>
         Batch Checks
       </Typography>
@@ -2066,6 +2801,65 @@ const clientEmployees = filteredEmployees.filter(emp => {
             >
                Use Previous Batch
             </Button>
+            
+            {/* Continue Reviewing Button - Show if there's saved data */}
+            {(() => {
+              // Check if there's any saved data: either selected employees OR input data
+              // First check in-memory state
+              let hasSavedData = Object.keys(tabData).length > 0 && 
+                Object.values(tabData).some(tab => {
+                  // Check for selected employees
+                  const hasSelectedEmployees = Object.keys(tab.selectedEmployees || {}).some(id => tab.selectedEmployees[id]);
+                  // Check for input data (even if employee isn't "selected", they might have data)
+                  const hasInputData = Object.keys(tab.inputs || {}).length > 0;
+                  return hasSelectedEmployees || hasInputData;
+                });
+              
+              // If no data in memory, check localStorage directly as fallback
+              // This ensures the button shows even if state hasn't been restored yet
+              if (!hasSavedData) {
+                try {
+                  const savedTabData = localStorage.getItem('batchChecks_tabData');
+                  if (savedTabData) {
+                    const parsed = JSON.parse(savedTabData);
+                    hasSavedData = Object.keys(parsed).length > 0 && 
+                      Object.values(parsed).some((tab: any) => {
+                        const hasSelectedEmployees = Object.keys(tab.selectedEmployees || {}).some((id: string) => tab.selectedEmployees[id]);
+                        const hasInputData = Object.keys(tab.inputs || {}).length > 0;
+                        return hasSelectedEmployees || hasInputData;
+                      });
+                  }
+                } catch (e) {
+                  console.error('Error checking localStorage for saved data:', e);
+                }
+              }
+              
+              if (!hasSavedData) return null;
+              
+              return (
+                <Button
+                  variant="contained"
+                  onClick={reviewChecks}
+                  sx={{
+                    borderRadius: 2,
+                    px: 3,
+                    py: 1.5,
+                    fontWeight: 'bold',
+                    ml: 2,
+                    backgroundColor: '#4caf50',
+                    color: 'white',
+                    '&:hover': {
+                      backgroundColor: '#45a049',
+                      transform: 'translateY(-1px)',
+                      boxShadow: 2
+                    },
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  📋 Continue Reviewing
+                </Button>
+              );
+            })()}
         
           
                 </>
@@ -2089,9 +2883,12 @@ const clientEmployees = filteredEmployees.filter(emp => {
                   scrollButtons="auto"
                   sx={{ 
                     '& .MuiTab-root': { 
-                      minHeight: '48px',
+                      minHeight: '64px',
+                      fontSize: '1rem',
                       textTransform: 'none',
-                      fontWeight: 'bold'
+                      fontWeight: 'bold',
+                      px: 3,
+                      py: 2
                     }
                   }}
                 >
@@ -2111,7 +2908,8 @@ const clientEmployees = filteredEmployees.filter(emp => {
                       }
                       value={client.id}
                       sx={{ 
-                        minWidth: '120px',
+                        minWidth: '160px',
+                        fontSize: '1rem',
                         '&.Mui-selected': { 
                           backgroundColor: 'primary.light',
                           color: 'primary.contrastText',
@@ -2123,121 +2921,6 @@ const clientEmployees = filteredEmployees.filter(emp => {
                 </Tabs>
                       </Box>
               
-              {/* Employee Search Controls */}
-              <Paper sx={{ p: 2, mb: 2, bgcolor: '#f5f5f5' }} elevation={1}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-                  <Typography variant="subtitle2" sx={{ minWidth: 120, fontWeight: 'bold' }}>
-                    Search Employees:
-                  </Typography>
-                  <TextField
-                    size="small"
-                    placeholder="Type employee name to search..."
-                    value={employeeSearchTerm}
-                    onChange={(e) => setEmployeeSearchTerm(e.target.value)}
-                    sx={{ minWidth: 250, flexGrow: 1, maxWidth: 400 }}
-                  />
-                  {employeeSearchTerm && (
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      onClick={() => setEmployeeSearchTerm("")}
-                    >
-                      Clear Search
-                    </Button>
-                  )}
-              </Box>
-              </Paper>
-              
-              {/* Tab Content */}
-              {/* Empty box removed for cleaner interface */}
-              
-              {/* Quick Actions */}
-              <Box sx={{ display: 'flex', gap: 1, mt: 2, flexWrap: 'wrap' }}>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => {
-                    // Clear selections for the current client tab
-                    if (selectedClientId) {
-                      // Clear only employees for this client
-                      const currentClientEmployees = filteredEmployees.filter(emp => 
-                        emp.clientPayTypeRelationships?.some(rel => rel.clientId === selectedClientId) ||
-                        emp.clientId === selectedClientId
-                      );
-                      
-                      const newSelectedEmployees = { ...selectedEmployees };
-                      const newInputs = { ...inputs };
-                      
-                      // Clear selections and inputs only for current client employees
-                      currentClientEmployees.forEach(emp => {
-                        newSelectedEmployees[emp.id] = false;
-                        delete newInputs[emp.id];
-                      });
-                      
-                      setSelectedEmployees(newSelectedEmployees);
-                      setInputs(newInputs);
-                    }
-                  }}
-                 
-                >
-                  Clear Selection
-                </Button>
-                {selectedClientId && (
-                  <>
-                    <Button
-                      variant="contained"
-                      size="small"
-                      onClick={() => {
-                        // Select all employees who work for the currently selected client
-                        const clientEmployees = selectedClientId 
-                          ? filteredEmployees.filter(emp => 
-                          emp.clientPayTypeRelationships?.some(rel => rel.clientId === selectedClientId) ||
-                          emp.clientId === selectedClientId
-                            )
-                          : [];
-                        
-                        const newSelectedEmployees = { ...selectedEmployees };
-                        const newInputs = { ...inputs };
-                        
-                        clientEmployees.forEach(emp => {
-                          newSelectedEmployees[emp.id] = true;
-                          // Auto-set payment methods and relationships for this client
-                          const defaultPaymentMethods = getDefaultPaymentMethods(emp);
-                          const defaultRelationshipIds = getDefaultRelationshipIds(emp);
-                          const existingData = newInputs[emp.id] || {};
-                          newInputs[emp.id] = {
-                            ...existingData,
-                            paymentMethods: defaultPaymentMethods,
-                            selectedRelationshipIds: defaultRelationshipIds,
-                            hours: "",
-                            otHours: "",
-                            holidayHours: "",
-                            memo: "",
-                            perdiemAmount: "",
-                            perdiemBreakdown: false,
-                            perdiemMonday: "",
-                            perdiemTuesday: "",
-                            perdiemWednesday: "",
-                            perdiemThursday: "",
-                            perdiemFriday: "",
-                            perdiemSaturday: "",
-                            perdiemSunday: "",
-                            checkDate: defaultCheckDate ? createLocalDate(defaultCheckDate) : (existingData.checkDate || null),
-                          };
-                        });
-                        
-                        setSelectedEmployees(newSelectedEmployees);
-                        setInputs(newInputs);
-                      }}
-                     
-                    >
-                      Select All {companyClients.find(c => c.id === selectedClientId)?.name} Employees
-                    </Button>
-                    
-                   
-                  </>
-                )}
-              </Box>
             </Box>
           )}
 
@@ -2384,16 +3067,16 @@ const clientEmployees = filteredEmployees.filter(emp => {
             console.log('🔍 DEBUG: employeesToShow names:', employeesToShow.map(emp => emp.name));
             return (
               <>
+
                 {/* Master Date Picker - Populates all employee dates */}
-                {employeesToShow.length > 0 && (
-                  <Paper sx={{ p: 2, mb: 2, bgcolor: '#e3f2fd' }} elevation={2}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                      <Typography variant="subtitle1" fontWeight="bold" sx={{ minWidth: 150 }}>
+                {Object.keys(selectedEmployees).filter(id => selectedEmployees[id]).length > 0 && (
+                  <Paper sx={{ p: 1.5, mb: 2, bgcolor: '#e3f2fd' }} elevation={2}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+                      <Typography variant="subtitle2" fontWeight="bold" sx={{ minWidth: 'auto' }}>
                         Default Check Date:
                       </Typography>
                       <TextField
                         type="date"
-                        label="Apply to All Employees"
                         value={defaultCheckDate}
                         onClick={(e) => {
                           // Apply the current date to ALL employees across ALL tabs
@@ -2461,1789 +3144,658 @@ const clientEmployees = filteredEmployees.filter(emp => {
                           }
                         }}
                         InputLabelProps={{ shrink: true }}
-                        helperText="Click or change this date to apply it to all employees across all tabs. New employees selected will automatically get this date."
-                        sx={{ flex: 1 }}
+                        sx={{ width: '200px' }}
+                        size="small"
                       />
+                      {defaultCheckDate && (() => {
+                        const weekNumber = getWorkWeekNumber(defaultCheckDate);
+                        if (weekNumber !== null) {
+                          return (
+                            <Typography variant="body2" sx={{ color: 'text.secondary', fontWeight: 500 }}>
+                              Work Week {weekNumber}
+                            </Typography>
+                          );
+                        }
+                        return null;
+                      })()}
+                      <Typography variant="caption" sx={{ color: 'text.secondary', ml: 'auto', fontSize: '0.75rem' }}>
+                        Click or change this date to apply it to all employees across all tabs. New employees selected will automatically get this date.
+                      </Typography>
                     </Box>
                   </Paper>
                 )}
-                
-                {employeesToShow.map((emp) => (
-            <Paper
-              key={emp.id}
-              sx={{ p: 2, mt: 2, display: "flex", flexDirection: "column" }}
-              elevation={2}
-            >
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={!!selectedEmployees[emp.id]}
-                    onChange={() => toggleEmployee(emp.id)}
-                  />
-                }
-                label={
-                  <Typography variant="subtitle1" fontWeight="bold">
-                    {emp.name}
-                  </Typography>
-                }
-              />
 
-              {selectedEmployees[emp.id] && (
-                <Box
-                  sx={{
-                    display: "flex",
-                    flexWrap: "wrap",
-                    gap: 2,
-                    mt: 1,
-                  }}
-                >
-                  {/* Relationship selector removed - now auto-selected based on current client tab */}
-                  
-
-                  
-
-                  
-                  {/* Dynamic Payment Sections Based on Current Client Tab */}
-                  {selectedClientId && inputs[emp.id]?.selectedRelationshipIds && (inputs[emp.id]?.selectedRelationshipIds?.length || 0) > 0 && (
-                    <>
-                      {/* Get relationships for the current client tab only */}
-                  {(() => {
-                        const selectedRelationships = emp.clientPayTypeRelationships
-                          ?.filter((rel: any) => 
-                            inputs[emp.id]?.selectedRelationshipIds?.includes(rel.id) && 
-                            rel.clientId === selectedClientId
-                          ) || [];
-                        
-                        return selectedRelationships.map((relationship: any, index: number) => {
-                          const isHourly = relationship.payType === 'hourly';
-                          const isPerDiem = relationship.payType === 'perdiem';
+                {/* Employee Spreadsheet View - Show all selected employees in rows + always one empty row */}
+                <Paper sx={{ p: 2, overflow: 'hidden', width: '100%', maxWidth: '100%' }} elevation={2}>
+                  <TableContainer 
+                    sx={{ 
+                      maxHeight: '70vh', 
+                      overflowX: 'auto',
+                      overflowY: 'auto', 
+                      width: '100%',
+                      '&::-webkit-scrollbar': {
+                        height: '8px',
+                        width: '8px',
+                      },
+                      '&::-webkit-scrollbar-thumb': {
+                        backgroundColor: '#ccc',
+                        borderRadius: '4px',
+                      },
+                    }}
+                  >
+                    <Table size="small" stickyHeader sx={{ tableLayout: 'fixed', width: '100%' }}>
+                      <style>
+                        {`
+                          /* Hide number input spinners */
+                          input[type="number"]::-webkit-inner-spin-button,
+                          input[type="number"]::-webkit-outer-spin-button {
+                            -webkit-appearance: none;
+                            margin: 0;
+                          }
+                          input[type="number"] {
+                            -moz-appearance: textfield;
+                          }
+                        `}
+                      </style>
+                      <colgroup>
+                        <col style={{ width: '150px' }} />
+                        <col style={{ width: '100px' }} />
+                        <col style={{ width: '70px' }} />
+                        <col style={{ width: '70px' }} />
+                        <col style={{ width: '70px' }} />
+                        <col style={{ width: '70px' }} />
+                        <col style={{ width: '80px' }} />
+                        <col style={{ width: '80px' }} />
+                        <col style={{ width: '80px' }} />
+                        <col style={{ width: '80px' }} />
+                      </colgroup>
+                      <TableHead>
+                        <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
+                          <TableCell sx={{ fontWeight: 'bold', position: 'sticky', left: 0, zIndex: 3, backgroundColor: '#f5f5f5', p: 0.5, px: 0.75, minWidth: 200 }}>Name</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', p: 0.5, px: 0.75 }}>Check Date</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', p: 0.5, px: 0.75 }}>Hours</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', p: 0.5, px: 0.75 }}>OT Hours</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', p: 0.5, px: 0.75 }}>Holiday Hrs</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', p: 0.5, px: 0.75 }}>Per Diem</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', p: 0.5, px: 0.75 }}>Other Pay $</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', p: 0.5, px: 0.4 }}>Total $</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', p: 0.5, px: 0.3 }}>Memo</TableCell>
+                          <TableCell sx={{ fontWeight: 'bold', p: 0.5, px: 0.75 }}>Action</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {(() => {
+                          const selectedEmpIds = Object.keys(selectedEmployees).filter(id => selectedEmployees[id]);
+                          const rows: Array<{ empId: string | null; isNew: boolean }> = [];
                           
-                      return (
-                            <Box
-                              key={relationship.id}
-                              sx={{
-                                p: 1.5,
-                                mb: 1.5,
-                                backgroundColor: isHourly ? '#f0f8ff' : '#fff3e0',
-                                borderRadius: 1,
-                                border: `1px solid ${isHourly ? '#b3d9ff' : '#ffcc80'}`,
-                                width: '100%',
-                                position: 'relative'
-                              }}
-                            >
-                              {/* Client Header */}
-                              <Box sx={{ 
-                                display: 'flex', 
-                                justifyContent: 'space-between', 
-                                alignItems: 'center', 
-                                mb: 1,
-                                p: 0.5,
-                                backgroundColor: isHourly ? '#e3f2fd' : '#fff8e1',
-                                borderRadius: 0.5
-                              }}>
-                                <Typography variant="subtitle2" fontWeight="bold" sx={{ 
-                                  color: isHourly ? '#1976d2' : '#f57c00',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: 0.5
-                                }}>
-                                  {(() => {
-                                    const client = clients.find(c => c.id === relationship.clientId);
-                                    return client ? client.name : relationship.clientName;
-                                  })()} - {relationship.payType === 'hourly' ? 'Hourly' : 'Per Diem'}
-                                </Typography>
-                                <Button
-                                  size="small"
-                                  variant="outlined"
-                                  color="error"
-                                  onClick={() => {
-                                    // Remove this relationship from selection
-                                    const currentIds = inputs[emp.id]?.selectedRelationshipIds || [];
-                                    const newIds = currentIds.filter(id => id !== relationship.id);
-                                    handleInputChange(emp.id, "selectedRelationshipIds", newIds);
+                          // Add all selected employees
+                          selectedEmpIds.forEach(empId => {
+                            rows.push({ empId, isNew: false });
+                          });
+                          
+                          // Always add at least one empty row
+                          rows.push({ empId: null, isNew: true });
+                          
+                          return rows.map((row, index) => {
+                            const empId = row.empId;
+                            const isNewRow = row.isNew;
+                            
+                            // For new/empty rows
+                            if (isNewRow || !empId) {
+                              return (
+                                <TableRow 
+                                  key={`new-row-${index}`}
+                                  sx={{ 
+                                    '&:hover': { backgroundColor: '#f5f5f5' },
+                                    backgroundColor: '#fafafa'
                                   }}
-                                  sx={{ minWidth: 'auto', p: 0.5 }}
                                 >
-                                  ✕
-                                </Button>
-                              </Box>
-
-                              {/* Hourly Payment Fields */}
-                              {isHourly && (
-                                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 1 }}>
-                                  <TextField
-                                    label="Hours"
-                                    type="number"
-                                    value={(inputs[emp.id] as any)?.[`${relationship.id}_hours`] || ""}
-                                    onChange={(e) =>
-                                      (handleInputChange as any)(emp.id, `${relationship.id}_hours`, e.target.value)
-                                    }
-                                    sx={{ width: 140 }}
-                                    size="small"
-                                  />
-                                  <TextField
-                                    label="OT Hours"
-                                    type="number"
-                                    value={(inputs[emp.id] as any)?.[`${relationship.id}_otHours`] || ""}
-                                    onChange={(e) =>
-                                      (handleInputChange as any)(emp.id, `${relationship.id}_otHours`, e.target.value)
-                                    }
-                                    sx={{ width: 140 }}
-                                    size="small"
-                                  />
-                                  <TextField
-                                    label="Holiday Hours"
-                                    type="number"
-                                    value={(inputs[emp.id] as any)?.[`${relationship.id}_holidayHours`] || ""}
-                                    onChange={(e) =>
-                                      (handleInputChange as any)(emp.id, `${relationship.id}_holidayHours`, e.target.value)
-                                    }
-                                    sx={{ width: 140 }}
-                                    size="small"
-                                  />
-                                </Box>
-                              )}
+                                  <TableCell sx={{ position: 'sticky', left: 0, zIndex: 2, backgroundColor: '#fafafa', minWidth: 200 }}>
+                                    <Autocomplete
+                                      options={(employeesToShow || []).filter((emp: Employee) => emp && emp.id && !selectedEmployees[emp.id])}
+                                      getOptionLabel={(option: Employee) => option.name || ''}
+                                      value={null}
+                                      onChange={(event, newValue: Employee | null) => {
+                                        if (newValue && newValue.id) {
+                                          // Add the employee
+                                          setSelectedEmployees(prev => ({ ...prev, [newValue.id]: true }));
+                                          // Initialize input data with default date
+                                          if (defaultCheckDate) {
+                                            const dateValue = createLocalDate(defaultCheckDate);
+                                            setInputs(prev => ({
+                                              ...prev,
+                                              [newValue.id]: {
+                                                ...prev[newValue.id],
+                                                checkDate: dateValue
+                                              }
+                                            }));
+                                          }
+                                          // Auto-select this employee tab
+                                          setSelectedEmployeeTab(newValue.id);
+                                        }
+                                      }}
+                                      onClick={(e) => e.stopPropagation()}
+                                      renderInput={(params) => (
+                                        <TextField
+                                          {...params}
+                                          placeholder="Select employee..."
+                                          size="small"
+                                          sx={{ backgroundColor: 'white' }}
+                                        />
+                                      )}
+                                      sx={{ minWidth: 200 }}
+                                    />
+                                  </TableCell>
+                                  <TableCell>
+                                    <Typography variant="body2" sx={{ color: 'text.disabled' }}>-</Typography>
+                                  </TableCell>
+                                  <TableCell>
+                                    <Typography variant="body2" sx={{ color: 'text.disabled' }}>-</Typography>
+                                  </TableCell>
+                                  <TableCell>
+                                    <Typography variant="body2" sx={{ color: 'text.disabled' }}>-</Typography>
+                                  </TableCell>
+                                  <TableCell>
+                                    <Typography variant="body2" sx={{ color: 'text.disabled' }}>-</Typography>
+                                  </TableCell>
+                                  <TableCell>
+                                    <Typography variant="body2" sx={{ color: 'text.disabled' }}>-</Typography>
+                                  </TableCell>
+                                  <TableCell>
+                                    <Typography variant="body2" sx={{ color: 'text.disabled' }}>-</Typography>
+                                  </TableCell>
+                                  <TableCell>
+                                    <Typography variant="body2" sx={{ color: 'text.disabled' }}>-</Typography>
+                                  </TableCell>
+                                  <TableCell>
+                                    <Typography variant="body2" sx={{ color: 'text.disabled' }}>-</Typography>
+                                  </TableCell>
+                                  <TableCell>
+                                    <Typography variant="body2" sx={{ color: 'text.disabled' }}>-</Typography>
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            }
+                            
+                            // For existing employee rows
+                            const emp = employees.find(e => e.id === empId);
+                            if (!emp) return null;
+                            
+                            // Get relationship data for current client
+                            // Always get ALL active relationships for this client (not just ones in selectedRelationshipIds)
+                            // This ensures we show both hourly and per diem fields if both relationships exist
+                            let selectedRelationships = selectedClientId && emp.clientPayTypeRelationships
+                                ?.filter((rel: any) => 
+                                  rel.clientId === selectedClientId && rel.active
+                                ) || [];
+                            
+                            // Auto-initialize selectedRelationshipIds if not set (to include all relationships)
+                            if (selectedRelationships.length > 0 && !inputs[empId]?.selectedRelationshipIds) {
+                              const defaultIds = selectedRelationships.map((rel: any) => rel.id);
+                              handleInputChange(empId, "selectedRelationshipIds", defaultIds);
+                            } else if (selectedRelationships.length > 0 && inputs[empId]?.selectedRelationshipIds) {
+                              // Ensure selectedRelationshipIds includes all active relationships for this client
+                              const currentIds = inputs[empId].selectedRelationshipIds || [];
+                              const allActiveIds = selectedRelationships.map((rel: any) => rel.id);
+                              const missingIds = allActiveIds.filter((id: string) => !currentIds.includes(id));
+                              if (missingIds.length > 0) {
+                                // Add missing relationship IDs
+                                handleInputChange(empId, "selectedRelationshipIds", [...currentIds, ...missingIds]);
+                              }
+                            }
                               
-                              {/* Other Pay Section - Only show for hourly relationships */}
-                              {relationship.payType === 'hourly' && (
-                                <Box sx={{ mt: 1, mb: 1 }}>
-                                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                                    <Typography variant="subtitle2" fontWeight="bold" sx={{ color: '#1976d2' }}>
-                                      Other Pay
-                                    </Typography>
+                              // Find hourly and per diem relationships separately
+                              const hourlyRelationship = selectedRelationships.find((rel: any) => rel.payType === 'hourly');
+                              const perDiemRelationship = selectedRelationships.find((rel: any) => rel.payType === 'perdiem');
+                              const hasHourly = !!hourlyRelationship;
+                              const hasPerDiem = !!perDiemRelationship;
+                              
+                              // If no relationship, return a row with disabled fields
+                              if (!hourlyRelationship && !perDiemRelationship) {
+                                return (
+                                  <TableRow 
+                                    key={empId}
+                                    sx={{ 
+                                      '&:hover': { backgroundColor: '#f5f5f5' },
+                                      backgroundColor: selectedEmployeeTab === empId ? '#e3f2fd' : 'white'
+                                    }}
+                                    onClick={() => setSelectedEmployeeTab(empId)}
+                                  >
+                                    <TableCell sx={{ position: 'sticky', left: 0, zIndex: 2, backgroundColor: selectedEmployeeTab === empId ? '#e3f2fd' : 'white', p: 0.5, px: 0.75 }}>
+                                      <Checkbox
+                                        size="small"
+                                        checked={!!selectedEmployees[empId]}
+                                        onChange={(e) => {
+                                          e.stopPropagation();
+                                          setSelectedEmployees(prev => ({ ...prev, [empId]: e.target.checked }));
+                                        }}
+                                      />
+                                    </TableCell>
+                                    <TableCell sx={{ fontWeight: 'bold', position: 'sticky', left: 40, zIndex: 2, backgroundColor: selectedEmployeeTab === empId ? '#e3f2fd' : 'white', p: 0.5, px: 0.75, minWidth: 200 }}>
+                                      {emp.name}
+                                    </TableCell>
+                                    <TableCell colSpan={9}>
+                                      <Typography variant="body2" sx={{ color: 'text.secondary', fontStyle: 'italic' }}>
+                                        No relationship found for this client
+                                      </Typography>
+                                    </TableCell>
+                                  </TableRow>
+                                );
+                              }
+                              
+                              // Calculate totals from all relationships
+                              let hours = 0;
+                              let otHours = 0;
+                              let holidayHours = 0;
+                              let perDiemAmount = 0;
+                              let otherPayTotal = 0;
+                              
+                              // Calculate hourly totals if hourly relationship exists
+                              if (hourlyRelationship) {
+                                hours = parseFloat((inputs[empId] as any)?.[`${hourlyRelationship.id}_hours`] || '0');
+                                otHours = parseFloat((inputs[empId] as any)?.[`${hourlyRelationship.id}_otHours`] || '0');
+                                holidayHours = parseFloat((inputs[empId] as any)?.[`${hourlyRelationship.id}_holidayHours`] || '0');
+                                const otherPay = (inputs[empId] as any)?.[`${hourlyRelationship.id}_otherPay`] || [];
+                                otherPayTotal += otherPay.reduce((sum: number, item: OtherPayItem) => sum + parseFloat(item.amount || '0'), 0);
+                              }
+                              
+                              // Calculate per diem totals if per diem relationship exists
+                              if (perDiemRelationship) {
+                                const hasBreakdown = (inputs[empId] as any)?.[`${perDiemRelationship.id}_perdiemBreakdown`];
+                                if (hasBreakdown) {
+                                  perDiemAmount = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].reduce((sum, day) => {
+                                    return sum + parseFloat((inputs[empId] as any)?.[`${perDiemRelationship.id}_perdiem${day}`] || '0');
+                                  }, 0);
+                                } else {
+                                  perDiemAmount = parseFloat((inputs[empId] as any)?.[`${perDiemRelationship.id}_perdiemAmount`] || '0');
+                                }
+                                const otherPay = (inputs[empId] as any)?.[`${perDiemRelationship.id}_otherPay`] || [];
+                                otherPayTotal += otherPay.reduce((sum: number, item: OtherPayItem) => sum + parseFloat(item.amount || '0'), 0);
+                              }
+                              
+                              const totalAmount = calculateAmount(emp, inputs[empId] || {});
+                              const checkDate = inputs[empId]?.checkDate;
+                              const dateValue = checkDate 
+                                ? `${checkDate.getMonth() + 1}/${checkDate.getDate()}/${checkDate.getFullYear()}`
+                                : (defaultCheckDate ? new Date(defaultCheckDate).toLocaleDateString() : '');
+                              
+                              return (
+                                <TableRow 
+                                  key={empId}
+                                  sx={{ 
+                                    '&:hover': { backgroundColor: '#f5f5f5' },
+                                    backgroundColor: selectedEmployeeTab === empId ? '#e3f2fd' : 'white'
+                                  }}
+                                  onClick={() => setSelectedEmployeeTab(empId)}
+                                >
+                                  <TableCell sx={{ fontWeight: 'bold', position: 'sticky', left: 0, zIndex: 2, backgroundColor: selectedEmployeeTab === empId ? '#e3f2fd' : 'white', p: 0.5, px: 0.75, minWidth: 200 }}>
+                                    <Autocomplete
+                                      options={(employeesToShow || []).filter((e: Employee) => e && e.id && (!selectedEmployees[e.id] || e.id === empId))}
+                                      getOptionLabel={(option: Employee) => option.name || ''}
+                                      value={emp ? emp : null}
+                                      onChange={(event, newValue: Employee | null) => {
+                                        if (newValue && newValue.id && newValue.id !== empId) {
+                                          // Remove old employee
+                                          setSelectedEmployees(prev => {
+                                            const updated = { ...prev };
+                                            updated[empId] = false;
+                                            return updated;
+                                          });
+                                          setInputs(prev => {
+                                            const { [empId]: removed, ...rest } = prev;
+                                            return rest;
+                                          });
+                                          
+                                          // Add new employee
+                                          setSelectedEmployees(prev => ({ ...prev, [newValue.id]: true }));
+                                          // Initialize input data with default date
+                                          if (defaultCheckDate) {
+                                            const dateValue = createLocalDate(defaultCheckDate);
+                                            setInputs(prev => ({
+                                              ...prev,
+                                              [newValue.id]: {
+                                                ...prev[newValue.id],
+                                                checkDate: dateValue
+                                              }
+                                            }));
+                                          }
+                                          // Update selected tab if needed
+                                          if (selectedEmployeeTab === empId) {
+                                            setSelectedEmployeeTab(newValue.id);
+                                          }
+                                        }
+                                      }}
+                                      onClick={(e) => e.stopPropagation()}
+                                      renderInput={(params) => (
+                                        <TextField
+                                          {...params}
+                                          size="small"
+                                          sx={{ backgroundColor: 'white' }}
+                                        />
+                                      )}
+                                      sx={{ width: '100%' }}
+                                    />
+                                  </TableCell>
+                                  <TableCell sx={{ p: 0.5, px: 0.75 }}>
+                                    <TextField
+                                      type="date"
+                                      size="small"
+                                      value={checkDate 
+                                        ? `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`
+                                        : defaultCheckDate || ''}
+                                      onChange={(e) => {
+                                        if (e.target.value) {
+                                          const dateValue = createLocalDate(e.target.value);
+                                          handleInputChange(empId, "checkDate", dateValue);
+                                        } else {
+                                          handleInputChange(empId, "checkDate", null);
+                                        }
+                                      }}
+                                      onClick={(e) => e.stopPropagation()}
+                                      InputLabelProps={{ shrink: true }}
+                                      sx={{ width: '100%' }}
+                                    />
+                                  </TableCell>
+                                  <TableCell sx={{ p: 0.5, px: 0.75 }}>
+                                    {hasHourly && hourlyRelationship ? (
+                                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                        <TextField
+                                          type="number"
+                                          size="small"
+                                          value={(inputs[empId] as any)?.[`${hourlyRelationship.id}_hours`] || ""}
+                                          onChange={(e) => (handleInputChange as any)(empId, `${hourlyRelationship.id}_hours`, e.target.value)}
+                                          onClick={(e) => e.stopPropagation()}
+                                          sx={{ 
+                                            flex: 1,
+                                            minWidth: '40px',
+                                            '& input': {
+                                              padding: '4px 8px',
+                                            },
+                                            '& input[type=number]': {
+                                              MozAppearance: 'textfield',
+                                              '&::-webkit-outer-spin-button': { display: 'none' },
+                                              '&::-webkit-inner-spin-button': { display: 'none' },
+                                            }
+                                          }}
+                                        />
+                                        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.7rem', whiteSpace: 'nowrap', flexShrink: 0, fontWeight: 'bold' }}>
+                                          ×${getRelationshipPayRate(emp, hourlyRelationship.id)}
+                                        </Typography>
+                                      </Box>
+                                    ) : (
+                                      <Typography variant="body2" sx={{ color: 'text.disabled', fontSize: '0.75rem' }}>-</Typography>
+                                    )}
+                                  </TableCell>
+                                  <TableCell sx={{ p: 0.5, px: 0.75 }}>
+                                    {hasHourly && hourlyRelationship ? (
+                                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                        <TextField
+                                          type="number"
+                                          size="small"
+                                          value={(inputs[empId] as any)?.[`${hourlyRelationship.id}_otHours`] || ""}
+                                          onChange={(e) => (handleInputChange as any)(empId, `${hourlyRelationship.id}_otHours`, e.target.value)}
+                                          onClick={(e) => e.stopPropagation()}
+                                          sx={{ 
+                                            flex: 1,
+                                            minWidth: '40px',
+                                            '& input': {
+                                              padding: '4px 8px',
+                                            },
+                                            '& input[type=number]': {
+                                              MozAppearance: 'textfield',
+                                              '&::-webkit-outer-spin-button': { display: 'none' },
+                                              '&::-webkit-inner-spin-button': { display: 'none' },
+                                            }
+                                          }}
+                                        />
+                                        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.7rem', whiteSpace: 'nowrap', flexShrink: 0, fontWeight: 'bold' }}>
+                                          ×${(getRelationshipPayRate(emp, hourlyRelationship.id) * 1.5).toFixed(2)}
+                                        </Typography>
+                                      </Box>
+                                    ) : (
+                                      <Typography variant="body2" sx={{ color: 'text.disabled', fontSize: '0.75rem' }}>-</Typography>
+                                    )}
+                                  </TableCell>
+                                  <TableCell sx={{ p: 0.5, px: 0.75 }}>
+                                    {hasHourly && hourlyRelationship ? (
+                                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                        <TextField
+                                          type="number"
+                                          size="small"
+                                          value={(inputs[empId] as any)?.[`${hourlyRelationship.id}_holidayHours`] || ""}
+                                          onChange={(e) => (handleInputChange as any)(empId, `${hourlyRelationship.id}_holidayHours`, e.target.value)}
+                                          onClick={(e) => e.stopPropagation()}
+                                          sx={{ 
+                                            flex: 1,
+                                            minWidth: '40px',
+                                            '& input': {
+                                              padding: '4px 8px',
+                                            },
+                                            '& input[type=number]': {
+                                              MozAppearance: 'textfield',
+                                              '&::-webkit-outer-spin-button': { display: 'none' },
+                                              '&::-webkit-inner-spin-button': { display: 'none' },
+                                            }
+                                          }}
+                                        />
+                                        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.7rem', whiteSpace: 'nowrap', flexShrink: 0, fontWeight: 'bold' }}>
+                                          ×${(getRelationshipPayRate(emp, hourlyRelationship.id) * 2).toFixed(2)}
+                                        </Typography>
+                                      </Box>
+                                    ) : (
+                                      <Typography variant="body2" sx={{ color: 'text.disabled', fontSize: '0.75rem' }}>-</Typography>
+                                    )}
+                                  </TableCell>
+                                  <TableCell sx={{ p: 0.5, px: 0.75 }}>
+                                    {hasPerDiem && perDiemRelationship ? (
+                                      <TextField
+                                        type="number"
+                                        size="small"
+                                        value={(inputs[empId] as any)?.[`${perDiemRelationship.id}_perdiemAmount`] || ""}
+                                        onChange={(e) => (handleInputChange as any)(empId, `${perDiemRelationship.id}_perdiemAmount`, e.target.value)}
+                                        onClick={(e) => e.stopPropagation()}
+                                        sx={{ 
+                                          width: '100%',
+                                          '& input[type=number]': {
+                                            MozAppearance: 'textfield',
+                                            '&::-webkit-outer-spin-button': { display: 'none' },
+                                            '&::-webkit-inner-spin-button': { display: 'none' },
+                                          }
+                                        }}
+                                      />
+                                    ) : (
+                                      <Typography variant="body2" sx={{ color: 'text.disabled', fontSize: '0.75rem' }}>-</Typography>
+                                    )}
+                                  </TableCell>
+                                  <TableCell sx={{ p: 0.5, px: 0.75 }}>
                                     <Button
                                       size="small"
                                       variant="outlined"
                                       startIcon={<AddIcon />}
-                                      onClick={() => {
-                                        const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                        const newOtherPayItem = {
-                                          id: Date.now().toString(),
-                                          description: '',
-                                          amount: ''
-                                        };
-                                        handleInputChange(emp.id, `${relationship.id}_otherPay`, [...currentOtherPay, newOtherPayItem]);
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOtherPayDialogOpen(empId);
                                       }}
-                                      sx={{ fontSize: '0.7rem', py: 0.5 }}
+                                      sx={{ 
+                                        width: 'auto',
+                                        minWidth: 'auto',
+                                        justifyContent: 'flex-start',
+                                        textTransform: 'none',
+                                        fontSize: '0.7rem',
+                                        py: 0.25,
+                                        px: 1
+                                      }}
                                     >
-                                      Add Other Pay
+                                      {otherPayTotal > 0 ? `$${otherPayTotal.toFixed(2)}` : '+ Add'}
                                     </Button>
-                                  </Box>
-                                  
-                                  {((inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || []).map((item: OtherPayItem, index: number) => (
-                                    <Box key={item.id} sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}>
-                                      <TextField
-                                        label="Description"
-                                        value={item.description}
-                                        onChange={(e) => {
-                                          const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                          const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
-                                            payItem.id === item.id ? { ...payItem, description: e.target.value } : payItem
-                                          );
-                                          handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                        }}
-                                        sx={{ flex: 2 }}
-                                        size="small"
-                                      />
-                                      <TextField
-                                        label="Amount"
-                                        type="number"
-                                        value={item.amount}
-                                        onChange={(e) => {
-                                          const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                          const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
-                                            payItem.id === item.id ? { ...payItem, amount: e.target.value } : payItem
-                                          );
-                                          handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                        }}
-                                        sx={{ width: 100 }}
-                                        size="small"
-                                      />
-                                      <IconButton
-                                        size="small"
-                                        color="error"
-                                        onClick={() => {
-                                          const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                          const updatedOtherPay = currentOtherPay.filter((payItem: OtherPayItem) => payItem.id !== item.id);
-                                          handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                        }}
-                                      >
-                                        <DeleteIcon />
-                                      </IconButton>
-                                    </Box>
-                                  ))}
-                                </Box>
-                              )}
-
-                              {/* Per Diem Payment Fields */}
-                              {isPerDiem && (
-                                <>
-                                  {/* Per Diem Type Selection */}
-                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1 }}>
-                                    <Typography variant="body2" color="#f57c00">
-                                      Payment Type:
-                                    </Typography>
-                                    <Box sx={{ display: 'flex', gap: 1 }}>
-                                      <Button
-                                        size="small"
-                                        variant={(inputs[emp.id] as any)?.[`${relationship.id}_perdiemBreakdown`] ? "outlined" : "contained"}
-                                        onClick={() => (handleInputChange as any)(emp.id, `${relationship.id}_perdiemBreakdown`, false)}
-                                        sx={{ 
-                                          backgroundColor: (inputs[emp.id] as any)?.[`${relationship.id}_perdiemBreakdown`] ? 'transparent' : '#f57c00',
-                                          color: (inputs[emp.id] as any)?.[`${relationship.id}_perdiemBreakdown`] ? '#f57c00' : 'white',
-                                          borderColor: '#f57c00',
-                                          '&:hover': {
-                                            backgroundColor: (inputs[emp.id] as any)?.[`${relationship.id}_perdiemBreakdown`] ? 'transparent' : '#e65100',
-                                          }
-                                        }}
-                                      >
-                                        Full Amount
-                                      </Button>
-                                      <Button
-                                        size="small"
-                                        variant={(inputs[emp.id] as any)?.[`${relationship.id}_perdiemBreakdown`] ? "contained" : "outlined"}
-                                        onClick={() => (handleInputChange as any)(emp.id, `${relationship.id}_perdiemBreakdown`, true)}
-                                        sx={{ 
-                                          backgroundColor: (inputs[emp.id] as any)?.[`${relationship.id}_perdiemBreakdown`] ? '#f57c00' : 'transparent',
-                                          color: (inputs[emp.id] as any)?.[`${relationship.id}_perdiemBreakdown`] ? 'white' : '#f57c00',
-                                          borderColor: '#f57c00',
-                                          '&:hover': {
-                                            backgroundColor: (inputs[emp.id] as any)?.[`${relationship.id}_perdiemBreakdown`] ? '#e65100' : 'transparent',
-                                          }
-                                        }}
-                                      >
-                                        Breakdown
-                                      </Button>
-                                    </Box>
-                                  </Box>
-                                  
-                                  {/* Per Diem Amount Input - Only show when FULL AMOUNT is selected */}
-                                  {!(inputs[emp.id] as any)?.[`${relationship.id}_perdiemBreakdown`] && (
+                                  </TableCell>
+                                  <TableCell sx={{ fontWeight: 'bold', color: 'primary.main', p: 0.5, px: 0.5 }}>
+                                    ${totalAmount}
+                                  </TableCell>
+                                  <TableCell sx={{ p: 0.5, px: 0.5 }}>
                                     <TextField
-                                      label="Amount"
-                                      type="number"
-                                      value={(inputs[emp.id] as any)?.[`${relationship.id}_perdiemAmount`] || ""}
-                                      onChange={(e) =>
-                                        (handleInputChange as any)(emp.id, `${relationship.id}_perdiemAmount`, e.target.value)
-                                      }
-                                      sx={{ width: 140, mb: 1 }}
                                       size="small"
+                                      value={inputs[empId]?.memo || ""}
+                                      onChange={(e) => handleInputChange(empId, "memo", e.target.value)}
+                                      onClick={(e) => e.stopPropagation()}
+                                      placeholder="Memo"
+                                      sx={{ 
+                                        width: '100%',
+                                        '& .MuiInputBase-input': {
+                                          padding: '4px 8px',
+                                          fontSize: '0.75rem'
+                                        }
+                                      }}
                                     />
-                                  )}
-                                  
-                                  {/* Per Diem Breakdown Fields - Only show when BREAKDOWN is selected */}
-                                  {(inputs[emp.id] as any)?.[`${relationship.id}_perdiemBreakdown`] && (
-                                    <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 1 }}>
-                                      {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map(day => (
-                                        <TextField
-                                          key={day}
-                                          label={day}
-                                          type="number"
-                                          value={(inputs[emp.id] as any)?.[`${relationship.id}_perdiem${day}`] || ""}
-                                          onChange={(e) =>
-                                            (handleInputChange as any)(emp.id, `${relationship.id}_perdiem${day}`, e.target.value)
-                                          }
-                                          sx={{ width: 120 }}
-                                          size="small"
-                                        />
-                                      ))}
-                                    </Box>
-                                  )}
-                                  
-                                  {/* Other Pay Section for Per Diem */}
-                                  <Box sx={{ mt: 1, mb: 1 }}>
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                                      <Typography variant="subtitle2" fontWeight="bold" sx={{ color: '#f57c00' }}>
-                                        Other Pay
-                                      </Typography>
-                                      <Button
-                                        size="small"
-                                        variant="outlined"
-                                        startIcon={<AddIcon />}
-                                        onClick={() => {
-                                          const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                          const newOtherPayItem = {
-                                            id: Date.now().toString(),
-                                            description: '',
-                                            amount: ''
-                                          };
-                                          handleInputChange(emp.id, `${relationship.id}_otherPay`, [...currentOtherPay, newOtherPayItem]);
-                                        }}
-                                        sx={{ fontSize: '0.7rem', py: 0.5 }}
-                                      >
-                                        Add Other Pay
-                                      </Button>
-                                    </Box>
-                                    
-                                    {((inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || []).map((item: OtherPayItem, index: number) => (
-                                      <Box key={item.id} sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}>
-                                        <TextField
-                                          label="Description"
-                                          value={item.description}
-                                          onChange={(e) => {
-                                            const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                            const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
-                                              payItem.id === item.id ? { ...payItem, description: e.target.value } : payItem
-                                            );
-                                            handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                          }}
-                                          sx={{ flex: 2 }}
-                                          size="small"
-                                        />
-                                        <TextField
-                                          label="Amount"
-                                          type="number"
-                                          value={item.amount}
-                                          onChange={(e) => {
-                                            const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                            const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
-                                              payItem.id === item.id ? { ...payItem, amount: e.target.value } : payItem
-                                            );
-                                            handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                          }}
-                                          sx={{ width: 100 }}
-                                          size="small"
-                                        />
-                                        <IconButton
-                                          size="small"
-                                          color="error"
-                                          onClick={() => {
-                                            const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                            const updatedOtherPay = currentOtherPay.filter((payItem: OtherPayItem) => payItem.id !== item.id);
-                                            handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                          }}
-                                        >
-                                          <DeleteIcon />
-                                        </IconButton>
-                                      </Box>
-                                    ))}
-                                  </Box>
-                                </>
-                              )}
+                                  </TableCell>
+                                  <TableCell sx={{ p: 0.5, px: 0.75 }}>
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      color="error"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedEmployees(prev => ({ ...prev, [empId]: false }));
+                                        setInputs(prev => {
+                                          const { [empId]: removed, ...rest } = prev;
+                                          return rest;
+                                        });
+                                        const remaining = Object.keys(selectedEmployees).filter(id => id !== empId && selectedEmployees[id]);
+                                        setSelectedEmployeeTab(remaining.length > 0 ? remaining[0] : null);
+                                      }}
+                                      sx={{ fontSize: '0.7rem', py: 0.25 }}
+                                    >
+                                      Remove
+                                    </Button>
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            });
+                          })()}
+                          </TableBody>
+                        </Table>
+                      </TableContainer>
+                    </Paper>
 
-                              {/* Calculation Breakdown */}
-                              {/* Calculation Breakdown - Above Total */}
-                              <Box sx={{ 
-                                mb: 0.5, 
-                                p: 0.75, 
-                                backgroundColor: isHourly ? '#e3f2fd' : '#fff8e1',
-                                borderRadius: 1,
-                                fontSize: '0.7rem',
-                                textAlign: 'center',
-                                color: isHourly ? '#1976d2' : '#f57c00'
-                              }}>
-                                {isHourly ? (
-                                  // Hourly breakdown
-                                  (() => {
-                                    const hours = parseFloat((inputs[emp.id] as any)?.[`${relationship.id}_hours`] || '0');
-                                    const otHours = parseFloat((inputs[emp.id] as any)?.[`${relationship.id}_otHours`] || '0');
-                                    const holidayHours = parseFloat((inputs[emp.id] as any)?.[`${relationship.id}_holidayHours`] || '0');
-                                    const rate = getRelationshipPayRate(emp, relationship.id);
-                                    const breakdown = [];
-                                    
-                                    if (hours > 0) breakdown.push(`${hours}hrs × $${rate} = $${(hours * rate).toFixed(2)}`);
-                                    if (otHours > 0) breakdown.push(`${otHours}OT × $${(rate * 1.5).toFixed(2)} = $${(otHours * rate * 1.5).toFixed(2)}`);
-                                    if (holidayHours > 0) breakdown.push(`${holidayHours}holiday × $${(rate * 2).toFixed(2)} = $${(holidayHours * rate * 2).toFixed(2)}`);
-                                    
-                                    return breakdown.length > 0 ? breakdown.join(' + ') : 'No hours entered';
-                                  })()
-                                ) : (
-                                  // Per diem breakdown
-                                  (() => {
-                                    // Check if any daily amounts are entered
-                                    const dailyTotals: number[] = [];
-                                    ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].forEach(day => {
-                                      const dayValue = parseFloat((inputs[emp.id] as any)[`${relationship.id}_perdiem${day}`] || '0');
-                                      if (dayValue > 0) dailyTotals.push(dayValue);
-                                    });
-                                    
-                                    let perDiemAmount = 0;
-                                    if (dailyTotals.length > 0) {
-                                      // Daily breakdown mode - use daily amounts
-                                      perDiemAmount = dailyTotals.reduce((sum, val) => sum + val, 0);
-                                    } else {
-                                      // Full amount mode - use single amount
-                                      perDiemAmount = parseFloat((inputs[emp.id] as any)[`${relationship.id}_perdiemAmount`] || '0');
-                                    }
-                                    
-                                    // Add Other Pay amounts for this relationship
-                                    const otherPayTotal = ((inputs[emp.id] as any)[`${relationship.id}_otherPay`] || []).reduce((sum: number, item: OtherPayItem) => sum + (parseFloat(item.amount) || 0), 0);
-                                    
-                                    if (perDiemAmount > 0 || otherPayTotal > 0) {
-                                      const total = perDiemAmount + otherPayTotal;
-                                      const breakdown = [];
-                                      if (perDiemAmount > 0) {
-                                        breakdown.push(dailyTotals.length > 0 ? `$${perDiemAmount.toFixed(2)} (${dailyTotals.length} days)` : `$${perDiemAmount.toFixed(2)}`);
-                                      }
-                                      if (otherPayTotal > 0) {
-                                        breakdown.push(`Other Pay: $${otherPayTotal.toFixed(2)}`);
-                                      }
-                                      return breakdown.join(' + ');
-                                    }
-                                    return 'No amount entered';
-                                  })()
-                                )}
-                              </Box>
-                              
-                              {/* Payment Total for this relationship */}
-                              <Box sx={{ 
-                                display: 'flex', 
-                                justifyContent: 'space-between', 
-                                mt: 0.5, 
-                                p: 0.75, 
-                                backgroundColor: isHourly ? '#e3f2fd' : '#fff8e1', 
-                                borderRadius: 1 
-                              }}>
-                                <Typography variant="body2" fontWeight="bold" sx={{ color: isHourly ? '#1976d2' : '#f57c00' }}>
-                                  {isHourly ? 'Hourly' : 'Per Diem'} Total:
-                                </Typography>
-                                <Typography variant="body2" fontWeight="bold" sx={{ color: isHourly ? '#1976d2' : '#f57c00' }}>
-                                  ${isHourly 
-                                    ? calculateHourlyTotalForRelationship(emp, inputs[emp.id] || {}, relationship.id)
-                                    : calculatePerDiemTotalForRelationship(inputs[emp.id] || {}, relationship.id)
-                                  }
-                                </Typography>
-                              </Box>
-                            </Box>
-                          );
-                        });
-                  })()}
-                    </>
-                  )}
-
-                  {/* Legacy Single Client Support - Keep for backward compatibility */}
-                  {/* Only show legacy sections if employee has NO relationships and none selected in inputs */}
-                  {(() => {
-                    console.log(`🔍 [Legacy Gate] ${emp.name}:`, {
-                      selectedClientId,
-                      hasRelationships: !!(emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 0),
-                      relationshipsCount: emp.clientPayTypeRelationships?.length || 0,
-                      selectedRelationshipIds: inputs[emp.id]?.selectedRelationshipIds,
-                      selectedRelationshipIdsLength: inputs[emp.id]?.selectedRelationshipIds?.length || 0,
-                      shouldShowLegacy: selectedClientId !== 'multiple' &&
-                        (!emp.clientPayTypeRelationships || emp.clientPayTypeRelationships.length === 0) &&
-                        !(((inputs[emp.id]?.selectedRelationshipIds?.length) ?? 0) > 0)
-                    });
-                    return null;
-                  })()}
-                  {selectedClientId !== 'multiple' &&
-                    (!emp.clientPayTypeRelationships || emp.clientPayTypeRelationships.length === 0) &&
-                    !(((inputs[emp.id]?.selectedRelationshipIds?.length) ?? 0) > 0) && (
-                    <>
-                      {/* Hourly Section - Show on hourly clients */}
-                      {(() => {
-                        console.log(`🔍 [Legacy Hourly Check] ${emp.name}:`, {
-                          selectedClientId,
-                          payTypes: emp.payTypes,
-                          includesHourly: emp.payTypes?.includes('hourly'),
-                          willShowHourly: selectedClientId && emp.payTypes?.includes('hourly')
-                        });
-                        return null;
-                      })()}
-                      {selectedClientId && emp.payTypes?.includes('hourly') && (
-                    <Box sx={{ 
-                      p: 1.5, 
-                      mb: 1.5, 
-                      backgroundColor: '#f0f8ff', 
-                      borderRadius: 1, 
-                      border: '1px solid #b3d9ff',
-                      width: '100%'
-                    }}>
-                      <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 0.5, color: '#1976d2' }}>
-                        Hourly Payment
-                      </Typography>
-                      <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 1 }}>
-                  <TextField
-                    label="Hours"
-                    type="number"
-                    value={(() => {
-                      if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                        const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                        if (relationship) {
-                          return inputs[emp.id]?.[`${relationship.id}_hours`] || "";
-                        }
-                      }
-                      return inputs[emp.id]?.hours || "";
-                    })()}
-                    onChange={(e) => {
-                      if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                        const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                        if (relationship) {
-                          handleInputChange(emp.id, `${relationship.id}_hours`, e.target.value);
-                          return;
-                        }
-                      }
-                      handleInputChange(emp.id, "hours", e.target.value);
-                    }}
-                    sx={{ width: 140 }}
-                    size="small"
-                  />
-                  <TextField
-                    label="OT Hours"
-                    type="number"
-                    value={(() => {
-                      if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                        const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                        if (relationship) {
-                          return inputs[emp.id]?.[`${relationship.id}_otHours`] || "";
-                        }
-                      }
-                      return inputs[emp.id]?.otHours || "";
-                    })()}
-                    onChange={(e) => {
-                      if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                        const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                        if (relationship) {
-                          handleInputChange(emp.id, `${relationship.id}_otHours`, e.target.value);
-                          return;
-                        }
-                      }
-                      handleInputChange(emp.id, "otHours", e.target.value);
-                    }}
-                    sx={{ width: 140 }}
-                    size="small"
-                  />
-                  <TextField
-                    label="Holiday Hours"
-                    type="number"
-                    value={(() => {
-                      if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                        const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                        if (relationship) {
-                          return inputs[emp.id]?.[`${relationship.id}_holidayHours`] || "";
-                        }
-                      }
-                      return inputs[emp.id]?.holidayHours || "";
-                    })()}
-                    onChange={(e) => {
-                      if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                        const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                        if (relationship) {
-                          handleInputChange(emp.id, `${relationship.id}_holidayHours`, e.target.value);
-                          return;
-                        }
-                      }
-                      handleInputChange(emp.id, "holidayHours", e.target.value);
-                    }}
-                    sx={{ width: 140 }}
-                    size="small"
-                  />
-                      </Box>
-                      
-                      {/* Other Pay Section for Legacy */}
-                      <Box sx={{ mt: 1, mb: 1 }}>
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                          <Typography variant="subtitle2" fontWeight="bold" sx={{ color: '#1976d2' }}>
-                            Other Pay
-                          </Typography>
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            startIcon={<AddIcon />}
-                            onClick={() => {
-                              // Check if employee has relationships and we're on a single client tab
-                              if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                if (relationship) {
-                                  // Use relationship-specific field
-                                  const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                  const newOtherPayItem = {
-                                    id: Date.now().toString(),
-                                    description: '',
-                                    amount: ''
-                                  };
-                                  handleInputChange(emp.id, `${relationship.id}_otherPay`, [...currentOtherPay, newOtherPayItem]);
-                                  return;
-                                }
-                              }
-                              // Fallback to legacy field
-                              const currentOtherPay = inputs[emp.id]?.otherPay || [];
-                              const newOtherPayItem = {
-                                id: Date.now().toString(),
-                                description: '',
-                                amount: ''
-                              };
-                              handleInputChange(emp.id, "otherPay", [...currentOtherPay, newOtherPayItem]);
-                            }}
-                            sx={{ fontSize: '0.7rem', py: 0.5 }}
-                          >
-                            Add Other Pay
-                          </Button>
-                        </Box>
-                        
-                        {(() => {
-                          // Check if employee has relationships and we're on a single client tab
-                          if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                            const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                            if (relationship) {
-                              // Use relationship-specific field
-                              return ((inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || []).map((item: OtherPayItem, index: number) => (
-                                <Box key={item.id} sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}>
-                                  <TextField
-                                    label="Description"
-                                    value={item.description}
-                                    onChange={(e) => {
-                                      const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                      const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
-                                        payItem.id === item.id ? { ...payItem, description: e.target.value } : payItem
-                                      );
-                                      handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                    }}
-                                    sx={{ flex: 2 }}
-                                    size="small"
-                                  />
-                                  <TextField
-                                    label="Amount"
-                                    type="number"
-                                    value={item.amount}
-                                    onChange={(e) => {
-                                      const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                      const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
-                                        payItem.id === item.id ? { ...payItem, amount: e.target.value } : payItem
-                                      );
-                                      handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                    }}
-                                    sx={{ width: 100 }}
-                                    size="small"
-                                  />
-                                  <IconButton
-                                    size="small"
-                                    color="error"
-                                    onClick={() => {
-                                      const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                      const updatedOtherPay = currentOtherPay.filter((payItem: OtherPayItem) => payItem.id !== item.id);
-                                      handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                    }}
-                                  >
-                                    <DeleteIcon />
-                                  </IconButton>
-                                </Box>
-                              ));
-                            }
-                          }
-                          // Fallback to legacy field
-                          return (inputs[emp.id]?.otherPay || []).map((item: OtherPayItem, index: number) => (
-                            <Box key={item.id} sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}>
+                {/* Other Pay Dialog */}
+                {otherPayDialogOpen && (() => {
+                  const empId = otherPayDialogOpen;
+                  const emp = employees.find(e => e.id === empId);
+                  if (!emp) return null;
+                  
+                  // Get relationship for current client
+                  const selectedRelationships = selectedClientId && emp.clientPayTypeRelationships
+                    ?.filter((rel: any) => 
+                      inputs[empId]?.selectedRelationshipIds?.includes(rel.id) && 
+                      rel.clientId === selectedClientId
+                    ) || [];
+                  
+                  const primaryRelationship = selectedRelationships[0];
+                  if (!primaryRelationship) return null;
+                  
+                  const otherPayKey = `${primaryRelationship.id}_otherPay`;
+                  const currentOtherPay = (inputs[empId] as any)?.[otherPayKey] || [];
+                  
+                  return (
+                    <Dialog
+                      open={true}
+                      onClose={() => setOtherPayDialogOpen(null)}
+                      maxWidth="sm"
+                      fullWidth
+                    >
+                      <DialogTitle>
+                        Other Pay - {emp.name}
+                        <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: 0.5 }}>
+                          {(() => {
+                            const client = clients.find(c => c.id === primaryRelationship.clientId);
+                            return client?.name || primaryRelationship.clientName;
+                          })()} - {primaryRelationship.payType === 'hourly' ? 'Hourly' : 'Per Diem'}
+                        </Typography>
+                      </DialogTitle>
+                      <DialogContent>
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 1 }}>
+                          {currentOtherPay.map((item: OtherPayItem, index: number) => (
+                            <Box key={item.id} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
                               <TextField
                                 label="Description"
+                                size="small"
+                                fullWidth
                                 value={item.description}
                                 onChange={(e) => {
-                                  const currentOtherPay = inputs[emp.id]?.otherPay || [];
                                   const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
                                     payItem.id === item.id ? { ...payItem, description: e.target.value } : payItem
                                   );
-                                  handleInputChange(emp.id, "otherPay", updatedOtherPay);
+                                  handleInputChange(empId, otherPayKey, updatedOtherPay);
                                 }}
-                                sx={{ flex: 2 }}
-                                size="small"
                               />
                               <TextField
                                 label="Amount"
                                 type="number"
+                                size="small"
                                 value={item.amount}
                                 onChange={(e) => {
-                                  const currentOtherPay = inputs[emp.id]?.otherPay || [];
                                   const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
                                     payItem.id === item.id ? { ...payItem, amount: e.target.value } : payItem
                                   );
-                                  handleInputChange(emp.id, "otherPay", updatedOtherPay);
+                                  handleInputChange(empId, otherPayKey, updatedOtherPay);
                                 }}
-                                sx={{ width: 100 }}
-                                size="small"
+                                sx={{ width: 150 }}
                               />
                               <IconButton
                                 size="small"
                                 color="error"
                                 onClick={() => {
-                                  const currentOtherPay = inputs[emp.id]?.otherPay || [];
                                   const updatedOtherPay = currentOtherPay.filter((payItem: OtherPayItem) => payItem.id !== item.id);
-                                  handleInputChange(emp.id, "otherPay", updatedOtherPay);
+                                  handleInputChange(empId, otherPayKey, updatedOtherPay);
                                 }}
                               >
                                 <DeleteIcon />
                               </IconButton>
                             </Box>
-                          ));
-                        })()}
-                      </Box>
-                      
-                      {/* ✅ Hourly Total */}
-                      {/* Calculation Breakdown - Above Total */}
-                      <Box sx={{ 
-                        mb: 0.5, 
-                        p: 0.75, 
-                        backgroundColor: '#e3f2fd',
-                        borderRadius: 1,
-                        fontSize: '0.7rem',
-                        textAlign: 'center',
-                        color: '#1976d2'
-                      }}>
-                        {(() => {
-                          // If employee has relationships and we're on a single client tab, use relationship-specific data
-                          if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                            const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                            if (relationship) {
-                              const hours = parseFloat(inputs[emp.id]?.[`${relationship.id}_hours`] || '0');
-                              const otHours = parseFloat(inputs[emp.id]?.[`${relationship.id}_otHours`] || '0');
-                              const holidayHours = parseFloat(inputs[emp.id]?.[`${relationship.id}_holidayHours`] || '0');
-                              const rate = relationship.payRate ? parseFloat(relationship.payRate) : (emp.payRate || 0);
-                              const breakdown = [];
-                              
-                              if (hours > 0) breakdown.push(`${hours}hrs × $${rate} = $${(hours * rate).toFixed(2)}`);
-                              if (otHours > 0) breakdown.push(`${otHours}OT × $${(rate * 1.5).toFixed(2)} = $${(otHours * rate * 1.5).toFixed(2)}`);
-                              if (holidayHours > 0) breakdown.push(`${holidayHours}holiday × $${(rate * 2).toFixed(2)} = $${(holidayHours * rate * 2).toFixed(2)}`);
-                              
-                              // Add Other Pay amounts
-                              const otherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                              console.log(`🔍 [Breakdown Display] ${emp.name} - relationship ${relationship.id}:`, {
-                                otherPayItems: otherPay,
-                                selectedClientId,
-                                empId: emp.id,
-                                relationshipId: relationship.id
-                              });
-                              otherPay.forEach((item: OtherPayItem) => {
-                                if (parseFloat(item.amount) > 0) {
-                                  breakdown.push(`${item.description}: $${parseFloat(item.amount).toFixed(2)}`);
-                                }
-                              });
-                              
-                              return breakdown.length > 0 ? breakdown.map((item, index) => (
-                                <div key={index} style={{ marginBottom: '2px' }}>
-                                  {item}
-                                </div>
-                              )) : 'No hours entered';
-                            }
-                          }
+                          ))}
                           
-                          // Fallback to legacy fields
-                          const hours = parseFloat(inputs[emp.id]?.hours || '0');
-                          const otHours = parseFloat(inputs[emp.id]?.otHours || '0');
-                          const holidayHours = parseFloat(inputs[emp.id]?.holidayHours || '0');
-                          const rate = emp.payRate || 0;
-                          const breakdown = [];
+                          {currentOtherPay.length === 0 && (
+                            <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>
+                              No other pay items added yet
+                            </Typography>
+                          )}
                           
-                          if (hours > 0) breakdown.push(`${hours}hrs × $${rate} = $${(hours * rate).toFixed(2)}`);
-                          if (otHours > 0) breakdown.push(`${otHours}OT × $${(rate * 1.5).toFixed(2)} = $${(otHours * rate * 1.5).toFixed(2)}`);
-                          if (holidayHours > 0) breakdown.push(`${holidayHours}holiday × $${(rate * 2).toFixed(2)} = $${(holidayHours * rate * 2).toFixed(2)}`);
-                          
-                          // Add Other Pay amounts for legacy employees
-                          const otherPay = inputs[emp.id]?.otherPay || [];
-                          otherPay.forEach((item: OtherPayItem) => {
-                            if (parseFloat(item.amount) > 0) {
-                              breakdown.push(`${item.description}: $${parseFloat(item.amount).toFixed(2)}`);
-                            }
-                          });
-                          
-                          return breakdown.length > 0 ? breakdown.map((item, index) => (
-                            <div key={index} style={{ marginBottom: '2px' }}>
-                              {item}
-                            </div>
-                          )) : 'No hours entered';
-                        })()}
-                      </Box>
-
-                      {/* ✅ Hourly Total */}
-                      
-                    </Box>
-                  )}
-                  
-                      {/* Per Diem Section - Show on per diem clients */}
-                      {(() => {
-                        console.log('🔍 [Legacy Per Diem Check]', {
-                          empName: emp.name,
-                          selectedClientId,
-                          payTypes: emp.payTypes,
-                          includesPerdiem: emp.payTypes?.includes('perdiem'),
-                          willShowPerDiem: selectedClientId && emp.payTypes?.includes('perdiem')
-                        });
-                        return null;
-                      })()}
-                      {selectedClientId && emp.payTypes?.includes('perdiem') && (
-                    <Box sx={{ 
-                      p: 1.5, 
-                      mb: 1.5, 
-                      backgroundColor: '#fff3e0', 
-                      borderRadius: 1, 
-                      border: '1px solid #ffcc80',
-                      width: '100%'
-                    }}>
-                      <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 0.5, color: '#f57c00' }}>
-                        Per Diem Payment
-                      </Typography>
-                      
-                      {/* Per Diem Type Selection */}
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1 }}>
-                        <Typography variant="body2" color="#f57c00">
-                          Payment Type:
-                        </Typography>
-                        <Box sx={{ display: 'flex', gap: 1 }}>
                           <Button
-                            size="small"
-                            variant={(() => {
-                              if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                if (relationship) {
-                                  return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`] ? "outlined" : "contained";
-                                }
-                              }
-                              return inputs[emp.id]?.perdiemBreakdown ? "outlined" : "contained";
-                            })()}
-                            onClick={() => {
-                              if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                if (relationship) {
-                                  handleInputChange(emp.id, `${relationship.id}_perdiemBreakdown`, false);
-                                  return;
-                                }
-                              }
-                              handleInputChange(emp.id, "perdiemBreakdown", false);
-                            }}
-                            sx={{ 
-                              backgroundColor: (() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`] ? 'transparent' : '#f57c00';
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemBreakdown ? 'transparent' : '#f57c00';
-                              })(),
-                              color: (() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`] ? '#f57c00' : 'white';
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemBreakdown ? '#f57c00' : 'white';
-                              })(),
-                              borderColor: '#f57c00',
-                              '&:hover': {
-                                backgroundColor: (() => {
-                                  if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                    const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                    if (relationship) {
-                                      return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`] ? 'transparent' : '#e65100';
-                                    }
-                                  }
-                                  return inputs[emp.id]?.perdiemBreakdown ? 'transparent' : '#e65100';
-                                })(),
-                              }
-                            }}
-                          >
-                            Full Amount
-                          </Button>
-                          <Button
-                            size="small"
-                            variant={(() => {
-                              if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                if (relationship) {
-                                  return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`] ? "contained" : "outlined";
-                                }
-                              }
-                              return inputs[emp.id]?.perdiemBreakdown ? "contained" : "outlined";
-                            })()}
-                            onClick={() => {
-                              if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                if (relationship) {
-                                  handleInputChange(emp.id, `${relationship.id}_perdiemBreakdown`, true);
-                                  return;
-                                }
-                              }
-                              handleInputChange(emp.id, "perdiemBreakdown", true);
-                            }}
-                            sx={{ 
-                              backgroundColor: (() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`] ? '#f57c00' : 'transparent';
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemBreakdown ? '#f57c00' : 'transparent';
-                              })(),
-                              color: (() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`] ? 'white' : '#f57c00';
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemBreakdown ? 'white' : '#f57c00';
-                              })(),
-                              borderColor: '#f57c00',
-                              '&:hover': {
-                                backgroundColor: (() => {
-                                  if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                    const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                    if (relationship) {
-                                      return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`] ? '#e65100' : 'transparent';
-                                    }
-                                  }
-                                  return inputs[emp.id]?.perdiemBreakdown ? '#e65100' : 'transparent';
-                                })(),
-                              }
-                            }}
-                          >
-                            Breakdown
-                          </Button>
-                        </Box>
-                      </Box>
-
-                      {/* Full Amount Input */}
-                      {!(() => {
-                        if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                          const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                          if (relationship) {
-                            return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`];
-                          }
-                        }
-                        return inputs[emp.id]?.perdiemBreakdown;
-                      })() && (
-                  <TextField
-                          label="Amount"
-                          type="number"
-                          value={(() => {
-                            // If employee has relationships and we're on a single client tab, use relationship-specific field
-                            if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                              const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                              if (relationship) {
-                                return inputs[emp.id]?.[`${relationship.id}_perdiemAmount`] || "";
-                              }
-                            }
-                            // Fallback to legacy field
-                            return inputs[emp.id]?.perdiemAmount || "";
-                          })()}
-                          onChange={(e) => {
-                            // If employee has relationships and we're on a single client tab, update relationship-specific field
-                            if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                              const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                              if (relationship) {
-                                handleInputChange(emp.id, `${relationship.id}_perdiemAmount`, e.target.value);
-                                return;
-                              }
-                            }
-                            // Fallback to legacy field
-                            handleInputChange(emp.id, "perdiemAmount", e.target.value);
-                          }}
-                          sx={{ width: 250 }}
-                          placeholder="Enter amount"
-                          size="small"
-                        />
-                      )}
-
-                      {/* Daily Breakdown */}
-                      {(() => {
-                        if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                          const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                          if (relationship) {
-                            return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`];
-                          }
-                        }
-                        return inputs[emp.id]?.perdiemBreakdown;
-                      })() && (
-                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-                          <Typography variant="body2" fontWeight="bold" color="#f57c00" sx={{ mb: 0.5 }}>
-                            Daily Breakdown:
-                          </Typography>
-                          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 1 }}>
-                            <TextField
-                              label="Monday"
-                              type="number"
-                              value={(() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemMonday`] || "";
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemMonday || "";
-                              })()}
-                              onChange={(e) => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemMonday`, e.target.value);
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemBreakdown`, true);
-                                    return;
-                                  }
-                                }
-                                handleInputChange(emp.id, "perdiemMonday", e.target.value);
-                                handleInputChange(emp.id, "perdiemBreakdown", true);
-                              }}
-                              size="small"
-                              placeholder="0"
-                            />
-                            <TextField
-                              label="Tuesday"
-                              type="number"
-                              value={(() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemTuesday`] || "";
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemTuesday || "";
-                              })()}
-                              onChange={(e) => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemTuesday`, e.target.value);
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemBreakdown`, true);
-                                    return;
-                                  }
-                                }
-                                handleInputChange(emp.id, "perdiemTuesday", e.target.value);
-                                handleInputChange(emp.id, "perdiemBreakdown", true);
-                              }}
-                              size="small"
-                              placeholder="0"
-                            />
-                            <TextField
-                              label="Wednesday"
-                              type="number"
-                              value={(() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemWednesday`] || "";
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemWednesday || "";
-                              })()}
-                              onChange={(e) => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemWednesday`, e.target.value);
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemBreakdown`, true);
-                                    return;
-                                  }
-                                }
-                                handleInputChange(emp.id, "perdiemWednesday", e.target.value);
-                                handleInputChange(emp.id, "perdiemBreakdown", true);
-                              }}
-                              size="small"
-                              placeholder="0"
-                            />
-                            <TextField
-                              label="Thursday"
-                              type="number"
-                              value={(() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemThursday`] || "";
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemThursday || "";
-                              })()}
-                              onChange={(e) => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemThursday`, e.target.value);
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemBreakdown`, true);
-                                    return;
-                                  }
-                                }
-                                handleInputChange(emp.id, "perdiemThursday", e.target.value);
-                                handleInputChange(emp.id, "perdiemBreakdown", true);
-                              }}
-                              size="small"
-                              placeholder="0"
-                            />
-                            <TextField
-                              label="Friday"
-                              type="number"
-                              value={(() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemFriday`] || "";
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemFriday || "";
-                              })()}
-                              onChange={(e) => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemFriday`, e.target.value);
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemBreakdown`, true);
-                                    return;
-                                  }
-                                }
-                                handleInputChange(emp.id, "perdiemFriday", e.target.value);
-                                handleInputChange(emp.id, "perdiemBreakdown", true);
-                              }}
-                              size="small"
-                              placeholder="0"
-                            />
-                            <TextField
-                              label="Saturday"
-                              type="number"
-                              value={(() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemSaturday`] || "";
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemSaturday || "";
-                              })()}
-                              onChange={(e) => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemSaturday`, e.target.value);
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemBreakdown`, true);
-                                    return;
-                                  }
-                                }
-                                handleInputChange(emp.id, "perdiemSaturday", e.target.value);
-                                handleInputChange(emp.id, "perdiemBreakdown", true);
-                              }}
-                              size="small"
-                              placeholder="0"
-                            />
-                            <TextField
-                              label="Sunday"
-                              type="number"
-                              value={(() => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return inputs[emp.id]?.[`${relationship.id}_perdiemSunday`] || "";
-                                  }
-                                }
-                                return inputs[emp.id]?.perdiemSunday || "";
-                              })()}
-                              onChange={(e) => {
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemSunday`, e.target.value);
-                                    handleInputChange(emp.id, `${relationship.id}_perdiemBreakdown`, true);
-                                    return;
-                                  }
-                                }
-                                handleInputChange(emp.id, "perdiemSunday", e.target.value);
-                                handleInputChange(emp.id, "perdiemBreakdown", true);
-                              }}
-                              size="small"
-                              placeholder="0"
-                            />
-                          </Box>
-                        </Box>
-                      )}
-
-                      {/* Calculation Breakdown - Above Total */}
-                      <Box sx={{ 
-                        mb: 0.5, 
-                        p: 0.75, 
-                        backgroundColor: '#fff8e1',
-                        borderRadius: 1,
-                        fontSize: '0.7rem',
-                        textAlign: 'center',
-                        color: '#f57c00'
-                      }}>
-                        {(() => {
-                          // If employee has relationships and we're on a single client tab, use relationship-specific data
-                          if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                            const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                            if (relationship) {
-                              const perdiemBreakdown = inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`];
-                              if (perdiemBreakdown) {
-                                // Daily breakdown mode - calculate from relationship-specific daily fields
-                                const dailyTotal = ['perdiemMonday', 'perdiemTuesday', 'perdiemWednesday', 
-                                                   'perdiemThursday', 'perdiemFriday', 'perdiemSaturday', 'perdiemSunday']
-                                  .reduce((sum, day) => sum + parseFloat(inputs[emp.id]?.[`${relationship.id}_${day}`] || '0'), 0);
-                                return dailyTotal > 0 ? `$${dailyTotal.toFixed(2)} (daily breakdown)` : 'No daily amounts entered';
-                              } else {
-                                // Full amount mode - use relationship-specific amount
-                                const amount = parseFloat(inputs[emp.id]?.[`${relationship.id}_perdiemAmount`] || '0');
-                                return amount > 0 ? `$${amount.toFixed(2)}` : 'No amount entered';
-                              }
-                            }
-                          }
-                          
-                          // Fallback to legacy fields
-                          if (inputs[emp.id]?.perdiemBreakdown) {
-                            // Daily breakdown mode - just show total
-                            const total = parseFloat(calculatePerDiemTotal(inputs[emp.id] || {}));
-                            return total > 0 ? `$${total.toFixed(2)} (daily breakdown)` : 'No daily amounts entered';
-                          } else {
-                            // Full amount mode
-                            const amount = parseFloat(inputs[emp.id]?.perdiemAmount || '0');
-                            return amount > 0 ? `$${amount.toFixed(2)}` : 'No amount entered';
-                          }
-                        })()}
-                      </Box>
-
-                      {/* ✅ Per Diem Total */}
-                      <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 0.5, p: 0.75, backgroundColor: '#fff8e1', borderRadius: 1 }}>
-                        <Typography variant="body2" fontWeight="bold" color="#f57c00">
-                          Per Diem Total:
-                        </Typography>
-                        <Typography variant="body2" fontWeight="bold" color="#f57c00">
-                          ${(() => {
-                            // If employee has relationships and we're on a single client tab, use relationship-specific calculation
-                            if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                              const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                              if (relationship) {
-                                // For single client with relationship, calculate from relationship-specific fields
-                                const perdiemBreakdown = inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`];
-                                
-                                // Debug logging
-                                console.log(`🔍 DEBUG per diem total calculation for ${emp.name}:`, {
-                                  relationshipId: relationship.id,
-                                  perdiemBreakdown,
-                                  monday: inputs[emp.id]?.[`${relationship.id}_perdiemMonday`],
-                                  tuesday: inputs[emp.id]?.[`${relationship.id}_perdiemTuesday`],
-                                  wednesday: inputs[emp.id]?.[`${relationship.id}_perdiemWednesday`],
-                                  thursday: inputs[emp.id]?.[`${relationship.id}_perdiemThursday`],
-                                  friday: inputs[emp.id]?.[`${relationship.id}_perdiemFriday`],
-                                  saturday: inputs[emp.id]?.[`${relationship.id}_perdiemSaturday`],
-                                  sunday: inputs[emp.id]?.[`${relationship.id}_perdiemSunday`]
-                                });
-                                
-                                if (perdiemBreakdown) {
-                                  // Calculate from daily breakdown
-                                  const monday = parseFloat(inputs[emp.id]?.[`${relationship.id}_perdiemMonday`] || '0') || 0;
-                                  const tuesday = parseFloat(inputs[emp.id]?.[`${relationship.id}_perdiemTuesday`] || '0') || 0;
-                                  const wednesday = parseFloat(inputs[emp.id]?.[`${relationship.id}_perdiemWednesday`] || '0') || 0;
-                                  const thursday = parseFloat(inputs[emp.id]?.[`${relationship.id}_perdiemThursday`] || '0') || 0;
-                                  const friday = parseFloat(inputs[emp.id]?.[`${relationship.id}_perdiemFriday`] || '0') || 0;
-                                  const saturday = parseFloat(inputs[emp.id]?.[`${relationship.id}_perdiemSaturday`] || '0') || 0;
-                                  const sunday = parseFloat(inputs[emp.id]?.[`${relationship.id}_perdiemSunday`] || '0') || 0;
-                                  
-                                  const total = monday + tuesday + wednesday + thursday + friday + saturday + sunday;
-                                  console.log(`🔍 DEBUG calculated total: ${total}`);
-                                  return total > 0 ? total.toFixed(2) : '0.00';
-                                } else {
-                                  // Use full amount
-                                  const amount = parseFloat(inputs[emp.id]?.[`${relationship.id}_perdiemAmount`] || '0') || 0;
-                                  console.log(`🔍 DEBUG using full amount: ${amount}`);
-                                  return amount > 0 ? amount.toFixed(2) : '0.00';
-                                }
-                              }
-                            }
-                            // Fallback to legacy calculation
-                            return calculatePerDiemTotal(inputs[emp.id] || {});
-                          })()}
-                        </Typography>
-                      </Box>
-                      
-                      {/* Other Pay Section for Per Diem */}
-                      <Box sx={{ mt: 1, mb: 1 }}>
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                          <Typography variant="subtitle2" fontWeight="bold" sx={{ color: '#f57c00' }}>
-                            Other Pay
-                          </Typography>
-                          <Button
-                            size="small"
                             variant="outlined"
                             startIcon={<AddIcon />}
                             onClick={() => {
-                              // Check if employee has relationships and we're on a single client tab
-                              if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                if (relationship) {
-                                  // Use relationship-specific field
-                                  const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                  const newOtherPayItem = {
-                                    id: Date.now().toString(),
-                                    description: '',
-                                    amount: ''
-                                  };
-                                  handleInputChange(emp.id, `${relationship.id}_otherPay`, [...currentOtherPay, newOtherPayItem]);
-                                  return;
-                                }
-                              }
-                              // Fallback to legacy field
-                              const currentOtherPay = inputs[emp.id]?.otherPay || [];
                               const newOtherPayItem = {
                                 id: Date.now().toString(),
                                 description: '',
                                 amount: ''
                               };
-                              handleInputChange(emp.id, "otherPay", [...currentOtherPay, newOtherPayItem]);
+                              handleInputChange(empId, otherPayKey, [...currentOtherPay, newOtherPayItem]);
                             }}
-                            sx={{ fontSize: '0.7rem', py: 0.5 }}
+                            sx={{ mt: 1 }}
                           >
-                            Add Other Pay
+                            Add Other Pay Item
                           </Button>
-                        </Box>
-                        
-                        {(() => {
-                          // Check if employee has relationships and we're on a single client tab
-                          if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                            const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                            if (relationship) {
-                              // Use relationship-specific field
-                              return ((inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || []).map((item: OtherPayItem, index: number) => (
-                                <Box key={item.id} sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}>
-                                  <TextField
-                                    label="Description"
-                                    value={item.description}
-                                    onChange={(e) => {
-                                      const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                      const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
-                                        payItem.id === item.id ? { ...payItem, description: e.target.value } : payItem
-                                      );
-                                      handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                    }}
-                                    sx={{ flex: 2 }}
-                                    size="small"
-                                  />
-                                  <TextField
-                                    label="Amount"
-                                    type="number"
-                                    value={item.amount}
-                                    onChange={(e) => {
-                                      const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                      const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
-                                        payItem.id === item.id ? { ...payItem, amount: e.target.value } : payItem
-                                      );
-                                      handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                    }}
-                                    sx={{ width: 100 }}
-                                    size="small"
-                                  />
-                                  <IconButton
-                                    size="small"
-                                    color="error"
-                                    onClick={() => {
-                                      const currentOtherPay = (inputs[emp.id] as any)?.[`${relationship.id}_otherPay`] || [];
-                                      const updatedOtherPay = currentOtherPay.filter((payItem: OtherPayItem) => payItem.id !== item.id);
-                                      handleInputChange(emp.id, `${relationship.id}_otherPay`, updatedOtherPay);
-                                    }}
-                                  >
-                                    <DeleteIcon />
-                                  </IconButton>
-                                </Box>
-                              ));
-                            }
-                          }
-                          // Fallback to legacy field
-                          return (inputs[emp.id]?.otherPay || []).map((item: OtherPayItem, index: number) => (
-                            <Box key={item.id} sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}>
-                              <TextField
-                                label="Description"
-                                value={item.description}
-                                onChange={(e) => {
-                                  const currentOtherPay = inputs[emp.id]?.otherPay || [];
-                                  const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
-                                    payItem.id === item.id ? { ...payItem, description: e.target.value } : payItem
-                                  );
-                                  handleInputChange(emp.id, "otherPay", updatedOtherPay);
-                                }}
-                                sx={{ flex: 2 }}
-                                size="small"
-                              />
-                              <TextField
-                                label="Amount"
-                                type="number"
-                                value={item.amount}
-                                onChange={(e) => {
-                                  const currentOtherPay = inputs[emp.id]?.otherPay || [];
-                                  const updatedOtherPay = currentOtherPay.map((payItem: OtherPayItem) =>
-                                    payItem.id === item.id ? { ...payItem, amount: e.target.value } : payItem
-                                  );
-                                  handleInputChange(emp.id, "otherPay", updatedOtherPay);
-                                }}
-                                sx={{ width: 100 }}
-                                size="small"
-                              />
-                              <IconButton
-                                size="small"
-                                color="error"
-                                onClick={() => {
-                                  const currentOtherPay = inputs[emp.id]?.otherPay || [];
-                                  const updatedOtherPay = currentOtherPay.filter((payItem: OtherPayItem) => payItem.id !== item.id);
-                                  handleInputChange(emp.id, "otherPay", updatedOtherPay);
-                                }}
-                              >
-                                <DeleteIcon />
-                              </IconButton>
+                          
+                          {currentOtherPay.length > 0 && (
+                            <Box sx={{ mt: 2, p: 2, backgroundColor: '#f5f5f5', borderRadius: 1 }}>
+                              <Typography variant="subtitle2" fontWeight="bold">
+                                Total Other Pay: ${currentOtherPay.reduce((sum: number, item: OtherPayItem) => 
+                                  sum + parseFloat(item.amount || '0'), 0
+                                ).toFixed(2)}
+                              </Typography>
                             </Box>
-                          ));
-                        })()}
-                      </Box>
-                    </Box>
-                      )}
-                    </>
-                  )}
-                  <TextField
-                    label=""
-                    type="date"
-                    value={(() => {
-                      const checkDate = inputs[emp.id]?.checkDate;
-                      if (!checkDate) return '';
-                      return `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
-                    })()}
-                    onChange={(e) => {
-                      if (e.target.value) {
-                        // Use utility function to create date in local timezone
-                        const dateValue = createLocalDate(e.target.value);
-                        handleInputChange(emp.id, "checkDate", dateValue);
-                      } else {
-                        handleInputChange(emp.id, "checkDate", null);
-                      }
-                    }}
-                    sx={{ flex: 1, minWidth: 200 }}
-                    InputLabelProps={{
-                      shrink: true,
-                    }}
-                    placeholder="Select check date"
-                  />
-                  <TextField
-                    label="Memo (optional) - will show in middle section"
-                    value={inputs[emp.id]?.memo || ""}
-                    onChange={(e) =>
-                      handleInputChange(emp.id, "memo", e.target.value)
-                    }
-                    sx={{ flex: 1, minWidth: 200 }}
-                    placeholder="Enter memo (optional)"
-                  />
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                    <Typography variant="body2" color="text.secondary">
-                      Amount: $
-                    </Typography>
-                    <Typography variant="h6" color="primary">
-                      {calculateAmount(emp, inputs[emp.id] || { hours: "", otHours: "", holidayHours: "", memo: "", otherPay: [] })}
-                    </Typography>
-                  </Box>
-                  
-                  {/* Calculation Breakdown - Show based on client tab and actual data */}
-                  {(() => {
-                    // Show calculation breakdown if:
-                    // 1. Multiple Clients tab (show for any data)
-                    // 2. Americold Hourly tab (show for hourly data)
-                    // 3. Americold Per Diem tab (show for per diem data)
-                    const hasHourlyData = parseFloat(inputs[emp.id]?.hours || '0') > 0 || 
-                                        parseFloat(inputs[emp.id]?.otHours || '0') > 0 || 
-                                        parseFloat(inputs[emp.id]?.holidayHours || '0') > 0;
-                    const hasPerDiemData = (() => {
-                      // If employee has relationships and we're on a single client tab, use relationship-specific calculation
-                      if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                        const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                        if (relationship) {
-                          return parseFloat(calculatePerDiemTotalForRelationship(inputs[emp.id] || {}, relationship.id)) > 0;
-                        }
-                      }
-                      // Fallback to legacy calculation
-                      return parseFloat(calculatePerDiemTotal(inputs[emp.id] || {})) > 0;
-                    })();
-                    
-                    if (selectedClientId === 'multiple') {
-                      // Multiple clients: show for any data
-                      return (hasHourlyData || hasPerDiemData) && selectedEmployees[emp.id];
-                    } else if (selectedClientId && companyClients.find(c => c.id === selectedClientId)?.name.toLowerCase().includes('hourly')) {
-                      // Hourly client: show for hourly data only
-                      return hasHourlyData && selectedEmployees[emp.id];
-                    } else if (selectedClientId && companyClients.find(c => c.id === selectedClientId)?.name.toLowerCase().includes('per diem')) {
-                      // Per diem client: show for per diem data only
-                      return hasPerDiemData && selectedEmployees[emp.id];
-                    }
-                    return false;
-                  })() && (
-                    <Box sx={{ 
-                      mt: 1, 
-                      p: 2, 
-                      backgroundColor: '#f8f9fa', 
-                      borderRadius: 1, 
-                      border: '1px solid #e9ecef',
-                      width: '100%'
-                    }}>
-                      <Typography variant="caption" fontWeight="bold" sx={{ mb: 1, color: '#495057', display: 'block' }}>
-                        💰 Calculation Breakdown:
-                      </Typography>
-                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, fontSize: '0.75rem' }}>
-                        {/* Hourly data - only show on hourly or multiple clients tabs */}
-                        {(selectedClientId === 'multiple' || 
-                          (selectedClientId && companyClients.find(c => c.id === selectedClientId)?.name.toLowerCase().includes('hourly'))) && (
-                          <>
-                            {parseFloat(inputs[emp.id]?.hours || '0') > 0 && (
-                              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                <span>Regular Hours ({inputs[emp.id]?.hours || '0'}h × ${getEffectivePayRate(emp, inputs[emp.id] || {}, 'hourly').toFixed(2)}):</span>
-                                <span>${(parseFloat(inputs[emp.id]?.hours || '0') * getEffectivePayRate(emp, inputs[emp.id] || {}, 'hourly')).toFixed(2)}</span>
-                              </Box>
-                            )}
-                            {parseFloat(inputs[emp.id]?.otHours || '0') > 0 && (
-                              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                <span>OT Hours ({inputs[emp.id]?.otHours || '0'}h × ${(getEffectivePayRate(emp, inputs[emp.id] || {}, 'hourly') * 1.5).toFixed(2)}):</span>
-                                <span>${(parseFloat(inputs[emp.id]?.otHours || '0') * getEffectivePayRate(emp, inputs[emp.id] || {}, 'hourly') * 1.5).toFixed(2)}</span>
-                              </Box>
-                            )}
-                            {parseFloat(inputs[emp.id]?.holidayHours || '0') > 0 && (
-                              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                <span>Holiday Hours ({inputs[emp.id]?.holidayHours || '0'}h × ${(getEffectivePayRate(emp, inputs[emp.id] || {}, 'hourly') * 2).toFixed(2)}):</span>
-                                <span>${(parseFloat(inputs[emp.id]?.holidayHours || '0') * getEffectivePayRate(emp, inputs[emp.id] || {}, 'hourly') * 2).toFixed(2)}</span>
-                              </Box>
-                            )}
-                            {/* Other Pay items */}
-                            {(inputs[emp.id]?.otherPay || []).map((item: OtherPayItem, index: number) => (
-                              parseFloat(item.amount) > 0 && (
-                                <Box key={item.id} sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                  <span>{item.description}:</span>
-                                  <span>${parseFloat(item.amount).toFixed(2)}</span>
-                                </Box>
-                              )
-                            ))}
-                          </>
-                        )}
-                        {/* Per diem data - only show on per diem or multiple clients tabs */}
-                        {(selectedClientId === 'multiple' || 
-                          (selectedClientId && companyClients.find(c => c.id === selectedClientId)?.name.toLowerCase().includes('per diem'))) && (
-                          <>
-                            {(() => {
-                              // If employee has relationships and we're on a single client tab, use relationship-specific calculation
-                              if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                if (relationship) {
-                                  const total = parseFloat(calculatePerDiemTotalForRelationship(inputs[emp.id] || {}, relationship.id));
-                                  return total > 0 ? (
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                      <span>Per Diem Amount:</span>
-                                      <span>${total.toFixed(2)}</span>
-                                    </Box>
-                                  ) : null;
-                                }
-                              }
-                              // Fallback to legacy calculation
-                              const total = parseFloat(calculatePerDiemTotal(inputs[emp.id] || {}));
-                              return total > 0 ? (
-                                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                  <span>Per Diem Amount:</span>
-                                  <span>${total.toFixed(2)}</span>
-                                </Box>
-                              ) : null;
-                            })()}
-                            {/* ✅ Show daily breakdown if using breakdown mode */}
-                            {(() => {
-                              // If employee has relationships and we're on a single client tab, use relationship-specific fields
-                              if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                if (relationship) {
-                                  return inputs[emp.id]?.[`${relationship.id}_perdiemBreakdown`] && 
-                                         parseFloat(calculatePerDiemTotalForRelationship(inputs[emp.id] || {}, relationship.id)) > 0;
-                                }
-                              }
-                              // Fallback to legacy fields
-                              return inputs[emp.id]?.perdiemBreakdown && 
-                                     parseFloat(calculatePerDiemTotal(inputs[emp.id] || {})) > 0;
-                            })() && (
-                              <Box sx={{ ml: 2, mt: 0.5 }}>
-                                {(() => {
-                                  // If employee has relationships and we're on a single client tab, use relationship-specific fields
-                                  if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                    const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                    if (relationship) {
-                                      const monday = inputs[emp.id]?.[`${relationship.id}_perdiemMonday`];
-                                      return monday && parseFloat(monday) > 0 ? (
-                                        <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                          <span>• Monday:</span>
-                                          <span>${parseFloat(monday).toFixed(2)}</span>
-                                        </Box>
-                                      ) : null;
-                                    }
-                                  }
-                                  // Fallback to legacy fields
-                                  const monday = inputs[emp.id]?.perdiemMonday;
-                                  return monday && parseFloat(monday) > 0 ? (
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                      <span>• Monday:</span>
-                                      <span>${parseFloat(monday).toFixed(2)}</span>
-                                    </Box>
-                                  ) : null;
-                                })()}
-                                {(() => {
-                                  // If employee has relationships and we're on a single client tab, use relationship-specific fields
-                                  if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                    const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                    if (relationship) {
-                                      const tuesday = inputs[emp.id]?.[`${relationship.id}_perdiemTuesday`];
-                                      return tuesday && parseFloat(tuesday) > 0 ? (
-                                        <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                          <span>• Tuesday:</span>
-                                          <span>${parseFloat(tuesday).toFixed(2)}</span>
-                                        </Box>
-                                      ) : null;
-                                    }
-                                  }
-                                  // Fallback to legacy fields
-                                  const tuesday = inputs[emp.id]?.perdiemTuesday;
-                                  return tuesday && parseFloat(tuesday) > 0 ? (
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                      <span>• Tuesday:</span>
-                                      <span>${parseFloat(tuesday).toFixed(2)}</span>
-                                    </Box>
-                                  ) : null;
-                                })()}
-                                {(() => {
-                                  // If employee has relationships and we're on a single client tab, use relationship-specific fields
-                                  if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                    const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                    if (relationship) {
-                                      const wednesday = inputs[emp.id]?.[`${relationship.id}_perdiemWednesday`];
-                                      return wednesday && parseFloat(wednesday) > 0 ? (
-                                        <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                          <span>• Wednesday:</span>
-                                          <span>${parseFloat(wednesday).toFixed(2)}</span>
-                                        </Box>
-                                      ) : null;
-                                    }
-                                  }
-                                  // Fallback to legacy fields
-                                  const wednesday = inputs[emp.id]?.perdiemWednesday;
-                                  return wednesday && parseFloat(wednesday) > 0 ? (
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                      <span>• Wednesday:</span>
-                                      <span>${parseFloat(wednesday).toFixed(2)}</span>
-                                    </Box>
-                                  ) : null;
-                                })()}
-                                {(() => {
-                                  // If employee has relationships and we're on a single client tab, use relationship-specific fields
-                                  if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                    const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                    if (relationship) {
-                                      const thursday = inputs[emp.id]?.[`${relationship.id}_perdiemThursday`];
-                                      return thursday && parseFloat(thursday) > 0 ? (
-                                        <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                          <span>• Thursday:</span>
-                                          <span>${parseFloat(thursday).toFixed(2)}</span>
-                                        </Box>
-                                      ) : null;
-                                    }
-                                  }
-                                  // Fallback to legacy fields
-                                  const thursday = inputs[emp.id]?.perdiemThursday;
-                                  return thursday && parseFloat(thursday) > 0 ? (
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                      <span>• Thursday:</span>
-                                      <span>${parseFloat(thursday).toFixed(2)}</span>
-                                    </Box>
-                                  ) : null;
-                                })()}
-                                {(() => {
-                                  // If employee has relationships and we're on a single client tab, use relationship-specific fields
-                                  if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                    const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                    if (relationship) {
-                                      const friday = inputs[emp.id]?.[`${relationship.id}_perdiemFriday`];
-                                      return friday && parseFloat(friday) > 0 ? (
-                                        <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                          <span>• Friday:</span>
-                                          <span>${parseFloat(friday).toFixed(2)}</span>
-                                        </Box>
-                                      ) : null;
-                                    }
-                                  }
-                                  // Fallback to legacy fields
-                                  const friday = inputs[emp.id]?.perdiemFriday;
-                                  return friday && parseFloat(friday) > 0 ? (
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                      <span>• Friday:</span>
-                                      <span>${parseFloat(friday).toFixed(2)}</span>
-                                    </Box>
-                                  ) : null;
-                                })()}
-                                {(() => {
-                                  // If employee has relationships and we're on a single client tab, use relationship-specific fields
-                                  if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                    const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                    if (relationship) {
-                                      const saturday = inputs[emp.id]?.[`${relationship.id}_perdiemSaturday`];
-                                      return saturday && parseFloat(saturday) > 0 ? (
-                                        <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                          <span>• Saturday:</span>
-                                          <span>${parseFloat(saturday).toFixed(2)}</span>
-                                        </Box>
-                                      ) : null;
-                                    }
-                                  }
-                                  // Fallback to legacy fields
-                                  const saturday = inputs[emp.id]?.perdiemSaturday;
-                                  return saturday && parseFloat(saturday) > 0 ? (
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                      <span>• Saturday:</span>
-                                      <span>${parseFloat(saturday).toFixed(2)}</span>
-                                    </Box>
-                                  ) : null;
-                                })()}
-                                {(() => {
-                                  // If employee has relationships and we're on a single client tab, use relationship-specific fields
-                                  if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                    const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                    if (relationship) {
-                                      const sunday = inputs[emp.id]?.[`${relationship.id}_perdiemSunday`];
-                                      return sunday && parseFloat(sunday) > 0 ? (
-                                        <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                          <span>• Sunday:</span>
-                                          <span>${parseFloat(sunday).toFixed(2)}</span>
-                                        </Box>
-                                      ) : null;
-                                    }
-                                  }
-                                  // Fallback to legacy fields
-                                  const sunday = inputs[emp.id]?.perdiemSunday;
-                                  return sunday && parseFloat(sunday) > 0 ? (
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#666' }}>
-                                      <span>• Sunday:</span>
-                                      <span>${parseFloat(sunday).toFixed(2)}</span>
-                                    </Box>
-                                  ) : null;
-                                })()}
-                              </Box>
-                            )}
-                          </>
-                        )}
-                        <Divider sx={{ my: 0.5 }} />
-                        {/* ✅ Show individual totals if both payment methods are used (only on multiple clients tab) */}
-                        {selectedClientId === 'multiple' && 
-                         parseFloat(inputs[emp.id]?.hours || '0') > 0 && 
-                         parseFloat(calculatePerDiemTotal(inputs[emp.id] || {})) > 0 && (
-                          <>
-                            
-                            <Box sx={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', color: '#f57c00' }}>
-                              <span>Per Diem Total:</span>
-                              <span>${(() => {
-                                // If employee has relationships and we're on a single client tab, use relationship-specific calculation
-                                if (emp.clientPayTypeRelationships && selectedClientId !== 'multiple') {
-                                  const relationship = emp.clientPayTypeRelationships.find(rel => rel.clientId === selectedClientId);
-                                  if (relationship) {
-                                    return calculatePerDiemTotalForRelationship(inputs[emp.id] || {}, relationship.id);
-                                  }
-                                }
-                                // Fallback to legacy calculation
-                                return calculatePerDiemTotal(inputs[emp.id] || {});
-                              })()}</span>
-                            </Box>
-                            <Divider sx={{ my: 0.5 }} />
-                          </>
-                        )}
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', color: '#1976d2' }}>
-                          <span>Total Amount:</span>
-                          <span>${calculateAmount(emp, inputs[emp.id] || {})}</span>
+                          )}
                         </Box>
-                      </Box>
-                    </Box>
-                  )}
-                </Box>
-              )}
-            </Paper>
-
-            
-
-))}
-    
+                      </DialogContent>
+                      <DialogActions>
+                        <Button onClick={() => setOtherPayDialogOpen(null)}>
+                          Close
+                        </Button>
+                      </DialogActions>
+                    </Dialog>
+                  );
+                })()}
+                
 {/* Review Checks Button */}
 {(() => {
  const employeesWithData = employeesToShow.filter((emp: any) => {
@@ -4366,430 +3918,470 @@ return employeesWithData.length > 0 && (
             top: '50%',
             left: '50%',
             transform: 'translate(-50%, -50%)',
-            width: '90vw',
-            maxWidth: '800px',
-            maxHeight: '80vh',
+            width: '95vw',
+            maxWidth: '1400px',
+            maxHeight: '90vh',
             bgcolor: 'background.paper',
             borderRadius: 2,
             boxShadow: 24,
             p: 3,
             zIndex: 1300,
-            overflow: 'auto'
+            overflow: 'auto',
+            '@media print': {
+              position: 'static',
+              transform: 'none',
+              width: '100%',
+              maxWidth: '100%',
+              maxHeight: 'none',
+              boxShadow: 'none',
+              borderRadius: 0,
+              p: 2,
+              overflow: 'visible'
+            }
           }}
         >
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
             <Typography variant="h5" fontWeight="bold">
-              📋 Review Checks Before Creating
+              Review Checks Before Creating
             </Typography>
-            <Button
-              onClick={() => setShowReviewPanel(false)}
-              sx={{ minWidth: 'auto' }}
-            >
-              ✕
-            </Button>
+            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+              <Button
+                variant="outlined"
+                startIcon={<PrintIcon />}
+                onClick={generateReviewPDF}
+                sx={{ 
+                  minWidth: 'auto'
+                }}
+              >
+                Print PDF
+              </Button>
+              <Button
+                onClick={() => {
+                  setShowReviewPanel(false);
+                  setSelectedClientTab(null);
+                }}
+                sx={{ 
+                  minWidth: 'auto',
+                  '@media print': {
+                    display: 'none'
+                  }
+                }}
+              >
+                ✕
+              </Button>
+            </Box>
           </Box>
 
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+          <Typography 
+            variant="body2" 
+            color="text.secondary" 
+            sx={{ 
+              mb: 3,
+              '@media print': {
+                display: 'none'
+              }
+            }}
+          >
             Please review the following checks before creating them. You can go back to make changes if needed.
           </Typography>
-
-          {/* Review List */}
-          <Box sx={{ mb: 3 }}>
-            {reviewData.map((item, index) => (
-              <Paper key={index} sx={{ p: 2, mb: 2, border: '1px solid #e0e0e0' }}>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1 }}>
-                  <Typography variant="h6" fontWeight="bold">
-                    {item.employee.name}
-                  </Typography>
-                  <Typography variant="h6" color="primary" fontWeight="bold">
-                    ${item.calculatedAmount.toFixed(2)}
-                  </Typography>
-                </Box>
-
-                {/* Client Info */}
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                  {item.clientsWorked && item.clientsWorked.length > 1
-                    ? `Multiple Clients: ${item.clientsWorked.join(', ')}`
-                    : item.clientsWorked && item.clientsWorked.length === 1
-                    ? item.clientsWorked[0]
-                    : 'Unknown Client'}
-                </Typography>
-
-                {/* Relationship Breakdown */}
-                {item.clientBreakdown && item.clientBreakdown.length > 0 && (
-                  <Box sx={{ 
-                    mb: 1, 
-                    backgroundColor: '#f8f9fa',
-                    border: '1px solid #e9ecef',
-                    borderRadius: '6px',
-                    padding: '10px',
-                    fontSize: '0.7rem'
-                  }}>
-                    <Typography variant="caption" color="text.secondary" sx={{ 
-                      fontWeight: 'bold',
-                      display: 'block',
-                      mb: 1,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.5px',
-                      fontSize: '0.65rem'
-                    }}>
-                      Relationship Breakdown
-                    </Typography>
-                    
-                    <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.7rem' }}>
-                      <Box component="tbody">
-                        {item.clientBreakdown.map((breakdown, idx) => (
-                          <React.Fragment key={idx}>
-                            {/* Client Header Row */}
-                            <Box component="tr" sx={{ 
-                              backgroundColor: breakdown.payType === 'Hourly' ? '#e3f2fd' : '#fff8e1'
-                            }}>
-                              <Box component="td" sx={{ 
-                                py: 0.5, 
-                                px: 1,
-                                fontWeight: 'bold',
-                                fontSize: '0.75rem',
-                                color: breakdown.payType === 'Hourly' ? '#1976d2' : '#f57c00'
-                              }}>
-                                {breakdown.clientName}
-                              </Box>
-                              <Box component="td" sx={{ 
-                                py: 0.5, 
-                                px: 1,
-                                textAlign: 'right',
-                                fontSize: '0.6rem',
-                                fontWeight: 'bold',
-                                color: breakdown.payType === 'Hourly' ? '#1976d2' : '#f57c00'
-                              }}>
-                                {breakdown.payType}
-                              </Box>
-                            </Box>
-                            
-                            {/* Detail Rows */}
-                            {breakdown.details.map((detail, detailIdx) => (
-                              <Box component="tr" key={detailIdx}>
-                                <Box component="td" sx={{ 
-                                  py: 0.25, 
-                                  px: 1,
-                                  pl: 2,
-                                  color: '#666',
-                                  fontSize: '0.7rem'
-                                }}>
-                                  {detail.label}
-                                </Box>
-                                <Box component="td" sx={{ 
-                                  py: 0.25, 
-                                  px: 1,
-                                  textAlign: 'right',
-                                  fontFamily: 'monospace',
-                                  color: '#666',
-                                  fontSize: '0.7rem'
-                                }}>
-                                  {detail.value}
-                                </Box>
-                              </Box>
-                            ))}
-                            
-                            {/* Subtotal Row */}
-                            <Box component="tr" sx={{ 
-                              borderTop: '1px solid #e9ecef',
-                              borderBottom: idx < item.clientBreakdown!.length - 1 ? '1px solid #dee2e6' : 'none'
-                            }}>
-                              <Box component="td" sx={{ 
-                                py: 0.4, 
-                                px: 1,
-                                pl: 2,
-                                fontWeight: 'bold',
-                                fontSize: '0.7rem'
-                              }}>
-                                Subtotal
-                              </Box>
-                              <Box component="td" sx={{ 
-                                py: 0.4, 
-                                px: 1,
-                                textAlign: 'right',
-                                fontFamily: 'monospace',
-                                fontWeight: 'bold',
-                                fontSize: '0.7rem'
-                              }}>
-                                ${breakdown.amount.toFixed(2)}
-                              </Box>
-                            </Box>
-                          </React.Fragment>
-                        ))}
-                      </Box>
-                    </Box>
-                    
-                    <Box sx={{ 
-                      mt: 1.5, 
-                      pt: 1, 
-                      borderTop: '2px solid #dee2e6',
-                      display: 'flex', 
-                      justifyContent: 'space-between',
-                      alignItems: 'center'
-                    }}>
-                      <Typography variant="subtitle2" fontWeight="bold" sx={{ color: '#28a745', fontSize: '0.85rem' }}>
-                        TOTAL
-                      </Typography>
-                      <Typography variant="subtitle1" fontWeight="bold" sx={{ color: '#28a745', fontSize: '1rem', fontFamily: 'monospace' }}>
-                        ${item.calculatedAmount.toFixed(2)}
-                      </Typography>
-                    </Box>
-                  </Box>
-                )}
-                
-                {/* Fallback: Old Calculation Breakdown for legacy data */}
-                {(!item.clientBreakdown || item.clientBreakdown.length === 0) && (
-                <Box sx={{ 
-                  mb: 1, 
-                  backgroundColor: '#f8f9fa',
-                  border: '1px solid #e9ecef',
-                  borderRadius: '8px',
-                  padding: '12px',
-                  fontSize: '0.75rem'
-                }}>
-                  <Typography variant="caption" color="text.secondary" sx={{ 
-                    fontWeight: 'bold',
-                    display: 'block',
-                    mb: '8px',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.5px'
-                  }}>
-                    Calculation Breakdown
-                  </Typography>
-                  
-                  {(() => {
-                    const breakdownItems: Array<{label: string, value: string, type: 'hourly' | 'perdiem' | 'total'}> = [];
-                    
-                    // Check if this is multiple clients with relationships
-                    if (item.input.selectedRelationshipIds && item.input.selectedRelationshipIds.length > 0) {
-                      // Multiple clients mode - use relationship-specific data
-                      item.input.selectedRelationshipIds.forEach((relationshipId: string) => {
-                        const relationship = item.employee.clientPayTypeRelationships?.find((rel: any) => rel.id === relationshipId);
-                        if (relationship) {
-                          if (relationship.payType === 'hourly') {
-                            const hours = parseFloat((item.input as any)[`${relationshipId}_hours`] || '0');
-                            const otHours = parseFloat((item.input as any)[`${relationshipId}_otHours`] || '0');
-                            const holidayHours = parseFloat((item.input as any)[`${relationshipId}_holidayHours`] || '0');
-                            const rate = getRelationshipPayRate(item.employee, relationshipId);
-                            
-                            if (hours > 0) breakdownItems.push({
-                              label: `${relationship.clientName} - Regular Hours`,
-                              value: `${hours}hrs × $${rate} = $${(hours * rate).toFixed(2)}`,
-                              type: 'hourly'
-                            });
-                            if (otHours > 0) breakdownItems.push({
-                              label: `${relationship.clientName} - Overtime`,
-                              value: `${otHours}hrs × $${(rate * 1.5).toFixed(2)} = $${(otHours * rate * 1.5).toFixed(2)}`,
-                              type: 'hourly'
-                            });
-                            if (holidayHours > 0) breakdownItems.push({
-                              label: `${relationship.clientName} - Holiday`,
-                              value: `${holidayHours}hrs × $${(rate * 2).toFixed(2)} = $${(holidayHours * rate * 2).toFixed(2)}`,
-                              type: 'hourly'
-                            });
-                            
-                            // Add Other Pay items for this relationship
-                            const otherPay = (item.input as any)[`${relationshipId}_otherPay`] || [];
-                            otherPay.forEach((payItem: any) => {
-                              if (payItem.amount && parseFloat(payItem.amount) > 0) {
-                                breakdownItems.push({
-                                  label: payItem.description || 'Other Pay',
-                                  value: `$${parseFloat(payItem.amount).toFixed(2)}`,
-                                  type: 'hourly'
-                                });
-                              }
-                            });
-                          } else if (relationship.payType === 'perdiem') {
-                            const perdiemBreakdown = (item.input as any)[`${relationshipId}_perdiemBreakdown`];
-                            let perDiemAmount = 0;
-                            
-                            if (perdiemBreakdown) {
-                              // Daily breakdown mode
-                              const dailyTotals: number[] = [];
-                              ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].forEach(day => {
-                                const dayValue = parseFloat((item.input as any)[`${relationshipId}_perdiem${day}`] || '0');
-                                if (dayValue > 0) dailyTotals.push(dayValue);
-                              });
-                              if (dailyTotals.length > 0) {
-                                perDiemAmount = dailyTotals.reduce((sum, val) => sum + val, 0);
-                                const clientName = clients.find(c => c.id === relationship.clientId)?.name || relationship.clientName;
-                                breakdownItems.push({
-                                  label: `${clientName} - Daily Breakdown`,
-                                  value: `$${perDiemAmount.toFixed(2)} (${dailyTotals.length} days)`,
-                                  type: 'perdiem'
-                                });
-                              }
-                            } else {
-                              // Full amount mode
-                              perDiemAmount = parseFloat((item.input as any)[`${relationshipId}_perdiemAmount`] || '0');
-                              const clientName = clients.find(c => c.id === relationship.clientId)?.name || relationship.clientName;
-                              if (perDiemAmount > 0) breakdownItems.push({
-                                label: `${clientName} - Per Diem`,
-                                value: `$${perDiemAmount.toFixed(2)}`,
-                                type: 'perdiem'
-                              });
-                            }
-                            
-                            // Add Other Pay items for this per diem relationship
-                            const otherPay = (item.input as any)[`${relationshipId}_otherPay`] || [];
-                            otherPay.forEach((payItem: any) => {
-                              if (payItem.amount && parseFloat(payItem.amount) > 0) {
-                                breakdownItems.push({
-                                  label: `${relationship.clientName} - ${payItem.description || 'Other Pay'}`,
-                                  value: `$${parseFloat(payItem.amount).toFixed(2)}`,
-                                  type: 'perdiem'
-                                });
-                              }
-                            });
-                          }
-                        }
-                      });
-                    } else {
-                      // Single client mode - use legacy fields
-                      if (item.input.hours && parseFloat(item.input.hours) > 0) {
-                        const hours = parseFloat(item.input.hours);
-                        const rate = item.employee.payRate || 0;
-                        breakdownItems.push({
-                          label: 'Regular Hours',
-                          value: `${hours}hrs × $${rate} = $${(hours * rate).toFixed(2)}`,
-                          type: 'hourly'
-                        });
-                      }
-                      if (item.input.otHours && parseFloat(item.input.otHours) > 0) {
-                        const otHours = parseFloat(item.input.otHours);
-                        const rate = item.employee.payRate || 0;
-                        breakdownItems.push({
-                          label: 'Overtime Hours',
-                          value: `${otHours}hrs × $${(rate * 1.5).toFixed(2)} = $${(otHours * rate * 1.5).toFixed(2)}`,
-                          type: 'hourly'
-                        });
-                      }
-                      if (item.input.holidayHours && parseFloat(item.input.holidayHours) > 0) {
-                        const holidayHours = parseFloat(item.input.holidayHours);
-                        const rate = item.employee.payRate || 0;
-                        breakdownItems.push({
-                          label: 'Holiday Hours',
-                          value: `${holidayHours}hrs × $${(rate * 2).toFixed(2)} = $${(holidayHours * rate * 2).toFixed(2)}`,
-                          type: 'hourly'
-                        });
-                      }
-                      
-                      // Add Other Pay items for legacy employees
-                      const otherPay = item.input.otherPay || [];
-                      otherPay.forEach((payItem: any) => {
-                        if (payItem.amount && parseFloat(payItem.amount) > 0) {
-                          breakdownItems.push({
-                            label: payItem.description || 'Other Pay',
-                            value: `$${parseFloat(payItem.amount).toFixed(2)}`,
-                            type: 'hourly'
-                          });
-                        }
-                      });
-                      
-                      if (item.input.perdiemAmount && parseFloat(item.input.perdiemAmount) > 0 && !item.input.perdiemBreakdown) {
-                        breakdownItems.push({
-                          label: 'Per Diem',
-                          value: `$${parseFloat(item.input.perdiemAmount).toFixed(2)}`,
-                          type: 'perdiem'
-                        });
-                      }
-                      if (item.input.perdiemBreakdown) {
-                        const dailyTotals: number[] = [];
-                        ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].forEach(day => {
-                          const dayKey = `perdiem${day}` as keyof typeof item.input;
-                          if (item.input[dayKey] && parseFloat(item.input[dayKey] as string) > 0) {
-                            dailyTotals.push(parseFloat(item.input[dayKey] as string));
-                          }
-                        });
-                        if (dailyTotals.length > 0) {
-                          const total = dailyTotals.reduce((sum, val) => sum + val, 0);
-                          breakdownItems.push({
-                            label: 'Daily Breakdown',
-                            value: `$${total.toFixed(2)} (${dailyTotals.length} days)`,
-                            type: 'perdiem'
-                          });
-                        }
-                      }
-                    }
-                    
-                    // Add total line
-                    breakdownItems.push({
-                      label: 'TOTAL',
-                      value: `$${item.calculatedAmount.toFixed(2)}`,
-                      type: 'total'
-                    });
-                    
-                    return (
-                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                        {breakdownItems.map((item, index) => (
-                          <Box key={index} sx={{ 
-                            display: 'flex', 
-                            justifyContent: 'space-between', 
-                            alignItems: 'center',
-                            padding: item.type === 'total' ? '8px 0' : '4px 0',
-                            borderTop: item.type === 'total' ? '1px solid #dee2e6' : 'none',
-                            fontWeight: item.type === 'total' ? 'bold' : 'normal',
-                            color: item.type === 'total' ? 'primary.main' : 'text.secondary'
-                          }}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <Box sx={{ 
-                                width: '8px', 
-                                height: '8px', 
-                                borderRadius: '50%',
-                                backgroundColor: item.type === 'hourly' ? '#1976d2' : 
-                                               item.type === 'perdiem' ? '#f57c00' : '#4caf50'
-                              }} />
-                              <Typography variant="caption" sx={{ 
-                                fontWeight: item.type === 'total' ? 'bold' : 'medium',
-                                color: item.type === 'total' ? 'primary.main' : 'text.secondary'
-                              }}>
-                                {item.label}
-                              </Typography>
-                            </Box>
-                            <Typography variant="caption" sx={{ 
-                              fontFamily: 'monospace',
-                              fontWeight: item.type === 'total' ? 'bold' : 'medium',
-                              color: item.type === 'total' ? 'primary.main' : 'text.secondary'
-                            }}>
-                              {item.value}
-                            </Typography>
-                          </Box>
-                        ))}
-                      </Box>
-                    );
-                  })()}
-                </Box>
-                )}
-              </Paper>
-            ))}
-          </Box>
-
-          {/* Total Amount */}
-          <Box sx={{ p: 2, bgcolor: '#e3f2fd', borderRadius: 1, mb: 3 }}>
-            <Typography variant="h6" fontWeight="bold" textAlign="center">
-              Total Amount: ${reviewData.reduce((sum, item) => sum + item.calculatedAmount, 0).toFixed(2)}
+          
+          {/* Print Header - Only visible when printing */}
+          <Box
+            sx={{
+              display: 'none',
+              '@media print': {
+                display: 'block',
+                mb: 2,
+                pb: 2,
+                borderBottom: '2px solid #000'
+              }
+            }}
+          >
+            <Typography variant="h6" fontWeight="bold" sx={{ mb: 1 }}>
+              Payroll Checks Review
+            </Typography>
+            <Typography variant="body2">
+              Generated: {new Date().toLocaleString()}
+            </Typography>
+            <Typography variant="body2" sx={{ mt: 1 }}>
+              Company: {companies.find(c => c.id === selectedCompanyId)?.name || 'N/A'}
             </Typography>
           </Box>
 
+          {(() => {
+            // Get all unique clients/departments from all employees (using clientId as unique key)
+            const allClientsMap = new Map<string, { clientId: string; clientName: string; division?: string }>();
+            reviewData.forEach(item => {
+              if (item.clientBreakdown) {
+                item.clientBreakdown.forEach(breakdown => {
+                  // Use clientId as unique key
+                  const uniqueKey = breakdown.clientId;
+                  if (!allClientsMap.has(uniqueKey)) {
+                    allClientsMap.set(uniqueKey, {
+                      clientId: breakdown.clientId,
+                      clientName: breakdown.clientName,
+                      division: breakdown.division
+                    });
+                  }
+                });
+              }
+            });
+            const clientList = Array.from(allClientsMap.keys()).sort();
+
+            // Use selected client tab or default to first client
+            const currentSelectedTab = selectedClientTab || (clientList.length > 0 ? clientList[0] : null);
+
+            // Calculate totals per client (using clientId)
+            const clientTotals = clientList.map(uniqueKey => {
+              const clientInfo = allClientsMap.get(uniqueKey)!;
+              const total = reviewData.reduce((sum, item) => {
+                const breakdown = item.clientBreakdown?.find(b => b.clientId === uniqueKey);
+                return sum + (breakdown?.amount || 0);
+              }, 0);
+              // Create display name: "ClientName" or "ClientName (Division)" if division exists
+              const displayName = clientInfo.division && clientInfo.division.trim()
+                ? `${clientInfo.clientName} (${clientInfo.division})`
+                : clientInfo.clientName;
+              return { 
+                uniqueKey,
+                clientId: clientInfo.clientId,
+                clientName: clientInfo.clientName,
+                division: clientInfo.division,
+                displayName,
+                total 
+              };
+            }).sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+            // Get employees for selected client (using clientId)
+            const employeesForSelectedClient = currentSelectedTab
+              ? reviewData.filter(item => {
+                  return item.clientBreakdown?.some(b => b.clientId === currentSelectedTab);
+                })
+              : [];
+
+            return (
+              <Box>
+                {/* Summary Table - Totals per Client */}
+                <Paper sx={{ mb: 3, p: 2 }}>
+                  <Typography variant="h6" fontWeight="bold" sx={{ mb: 2 }}>
+                    Summary by Client/Department
+                  </Typography>
+                  <TableContainer>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
+                          <TableCell sx={{ fontWeight: 'bold' }}>Client/Department</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 'bold' }}>Total Amount</TableCell>
+                          <TableCell align="center" sx={{ fontWeight: 'bold' }}>Employees</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {clientTotals.map(({ uniqueKey, displayName, total }) => {
+                          const employeeCount = reviewData.filter(item => 
+                            item.clientBreakdown?.some(b => b.clientId === uniqueKey)
+                          ).length;
+                          return (
+                            <TableRow 
+                              key={uniqueKey}
+                              onClick={() => setSelectedClientTab(uniqueKey)}
+                              sx={{ 
+                                cursor: 'pointer',
+                                '&:hover': { backgroundColor: currentSelectedTab === uniqueKey ? '#e3f2fd' : '#f5f5f5' },
+                                backgroundColor: currentSelectedTab === uniqueKey ? '#e3f2fd' : 'white'
+                              }}
+                            >
+                              <TableCell sx={{ fontWeight: 'bold' }}>
+                                {displayName}
+                              </TableCell>
+                              <TableCell align="right" sx={{ fontWeight: 'bold', fontSize: '1.1rem' }}>
+                                ${total.toFixed(2)}
+                              </TableCell>
+                              <TableCell align="center">
+                                {employeeCount} {employeeCount === 1 ? 'employee' : 'employees'}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                        <TableRow sx={{ backgroundColor: '#e3f2fd', fontWeight: 'bold' }}>
+                          <TableCell sx={{ fontWeight: 'bold' }}>
+                            <strong>GRAND TOTAL</strong>
+                          </TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 'bold', fontSize: '1.2rem' }}>
+                            <strong>${reviewData.reduce((sum, item) => sum + item.calculatedAmount, 0).toFixed(2)}</strong>
+                          </TableCell>
+                          <TableCell align="center" sx={{ fontWeight: 'bold' }}>
+                            {reviewData.length} {reviewData.length === 1 ? 'employee' : 'employees'}
+                          </TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                </Paper>
+
+                {/* Detailed Employee Breakdown for Selected Client */}
+                {currentSelectedTab && employeesForSelectedClient.length > 0 && (
+                  <Paper sx={{ p: 2 }}>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                      <Typography variant="h6" fontWeight="bold">
+                        Employee Breakdown: {(() => {
+                          const selectedClientInfo = allClientsMap.get(currentSelectedTab);
+                          return selectedClientInfo 
+                            ? (selectedClientInfo.division && selectedClientInfo.division.trim()
+                                ? `${selectedClientInfo.clientName} (${selectedClientInfo.division})`
+                                : selectedClientInfo.clientName)
+                            : currentSelectedTab;
+                        })()}
+                      </Typography>
+                      <Box 
+                        sx={{ 
+                          display: 'flex', 
+                          gap: 1, 
+                          flexWrap: 'wrap',
+                          '@media print': {
+                            display: 'none'
+                          }
+                        }}
+                      >
+                        {clientTotals.map(({ uniqueKey, displayName, clientName }) => {
+                          return (
+                            <Button
+                              key={uniqueKey}
+                              variant={currentSelectedTab === uniqueKey ? "contained" : "outlined"}
+                              size="small"
+                              onClick={() => setSelectedClientTab(uniqueKey)}
+                              sx={{
+                                minWidth: 100,
+                                backgroundColor: currentSelectedTab === uniqueKey 
+                                  ? (clientName.toLowerCase().includes('fusion') ? '#1976d2' : 
+                                     clientName.toLowerCase().includes('lto') ? '#4caf50' : '#f57c00')
+                                  : 'transparent'
+                              }}
+                            >
+                              {displayName}
+                            </Button>
+                          );
+                        })}
+                      </Box>
+                    </Box>
+
+                    <TableContainer>
+                      <Table size="small" sx={{ tableLayout: 'auto' }}>
+                        <TableHead>
+                          <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
+                            <TableCell sx={{ fontWeight: 'bold' }}>Employee</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 'bold' }}>Hr</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 'bold' }}>OT</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 'bold' }}>H/D</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 'bold' }}>$Hr</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 'bold' }}>$OT</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 'bold' }}>$H/D</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 'bold' }}>Other</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 'bold' }}>Per Diem</TableCell>
+                            <TableCell align="center" sx={{ fontWeight: 'bold' }}>Date</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 'bold' }}>Amount</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {employeesForSelectedClient.map((item, index) => {
+                            const breakdown = item.clientBreakdown?.find(b => b.clientId === currentSelectedTab);
+                            if (!breakdown) return null;
+
+                            // Get check date from tabData if available
+                            const tabDataForClient = tabData[currentSelectedTab];
+                            const inputData = tabDataForClient?.inputs?.[item.employee.id];
+                            let checkDate = '';
+                            if (inputData?.checkDate) {
+                              const date = inputData.checkDate instanceof Date 
+                                ? inputData.checkDate 
+                                : new Date(inputData.checkDate);
+                              checkDate = `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`;
+                            }
+
+                            // Parse details to extract values
+                            let hours = 0;
+                            let otHours = 0;
+                            let holidayHours = 0;
+                            let hourlyAmount = 0;
+                            let otAmount = 0;
+                            let holidayAmount = 0;
+                            let otherPay = 0;
+                            let perDiem = 0;
+
+                            if (breakdown.details && breakdown.details.length > 0) {
+                              breakdown.details.forEach((detail) => {
+                                const label = detail.label.toLowerCase();
+                                const value = detail.value;
+                                
+                                // Extract regular hours (format: "30 hrs × $17")
+                                if (label.includes('hrs') && !label.includes('ot') && !label.includes('holiday')) {
+                                  const hrsMatch = detail.label.match(/(\d+(?:\.\d+)?)\s*hrs/i);
+                                  if (hrsMatch) hours = parseFloat(hrsMatch[1]);
+                                  const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                                  if (amountMatch) hourlyAmount = parseFloat(amountMatch[1].replace(/,/g, ''));
+                                }
+                                
+                                // Extract OT hours (format: "10 OT × $25.50")
+                                if (label.includes('ot') && !label.includes('holiday')) {
+                                  const otMatch = detail.label.match(/(\d+(?:\.\d+)?)\s*ot/i);
+                                  if (otMatch) otHours = parseFloat(otMatch[1]);
+                                  const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                                  if (amountMatch) otAmount = parseFloat(amountMatch[1].replace(/,/g, ''));
+                                }
+                                
+                                // Extract Holiday hours (format: "8 holiday × $34")
+                                if (label.includes('holiday')) {
+                                  const holidayMatch = detail.label.match(/(\d+(?:\.\d+)?)\s*holiday/i);
+                                  if (holidayMatch) holidayHours = parseFloat(holidayMatch[1]);
+                                  const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                                  if (amountMatch) holidayAmount = parseFloat(amountMatch[1].replace(/,/g, ''));
+                                }
+                                
+                                // Extract Per Diem (format: "Per Diem: $500.00")
+                                if (label.includes('per diem')) {
+                                  const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                                  if (amountMatch) perDiem += parseFloat(amountMatch[1].replace(/,/g, ''));
+                                }
+                                
+                                // Extract Other Pay (anything that's not hours, OT, holiday, or per diem)
+                                if (!label.includes('hrs') && !label.includes('ot') && !label.includes('holiday') && 
+                                    !label.includes('per diem') && !['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].includes(label.trim()) &&
+                                    value.includes('$')) {
+                                  const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                                  if (amountMatch) otherPay += parseFloat(amountMatch[1].replace(/,/g, ''));
+                                }
+                                
+                                // Also check for day names (per diem breakdown)
+                                const dayNames = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+                                if (dayNames.includes(label.trim()) && value.includes('$')) {
+                                  const amountMatch = value.match(/\$?([\d,]+\.?\d*)/);
+                                  if (amountMatch) perDiem += parseFloat(amountMatch[1].replace(/,/g, ''));
+                                }
+                              });
+                            }
+
+                            return (
+                              <TableRow 
+                                key={index}
+                                sx={{ '&:nth-of-type(odd)': { backgroundColor: '#fafafa' } }}
+                              >
+                                <TableCell sx={{ fontWeight: 'bold' }}>
+                                  {item.employee.name}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {hours > 0 ? hours.toFixed(1) : '0.0'}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {otHours > 0 ? otHours.toFixed(1) : '0.0'}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {holidayHours > 0 ? holidayHours.toFixed(1) : '0.0'}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {hourlyAmount > 0 ? `$${hourlyAmount.toFixed(2)}` : '-'}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {otAmount > 0 ? `$${otAmount.toFixed(2)}` : '-'}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {holidayAmount > 0 ? `$${holidayAmount.toFixed(2)}` : '-'}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {otherPay > 0 ? `$${otherPay.toFixed(2)}` : '-'}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {perDiem > 0 ? `$${perDiem.toFixed(2)}` : '-'}
+                                </TableCell>
+                                <TableCell align="center">
+                                  {checkDate || '-'}
+                                </TableCell>
+                                <TableCell align="right" sx={{ fontWeight: 'bold' }}>
+                                  <Typography 
+                                    variant="body1"
+                                    sx={{ 
+                                      color: breakdown.payType === 'Hourly' ? '#1976d2' : '#f57c00',
+                                      fontWeight: 'bold'
+                                    }}
+                                  >
+                                    ${breakdown.amount.toFixed(2)}
+                                  </Typography>
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                          <TableRow sx={{ backgroundColor: '#e3f2fd', fontWeight: 'bold' }}>
+                            <TableCell colSpan={10} sx={{ fontWeight: 'bold' }}>
+                              <strong>Subtotal for {(() => {
+                                const selectedClientInfo = allClientsMap.get(currentSelectedTab);
+                                return selectedClientInfo 
+                                  ? (selectedClientInfo.division && selectedClientInfo.division.trim()
+                                      ? `${selectedClientInfo.clientName} (${selectedClientInfo.division})`
+                                      : selectedClientInfo.clientName)
+                                  : currentSelectedTab;
+                              })()}</strong>
+                            </TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 'bold', fontSize: '1.1rem' }}>
+                              <strong>
+                                ${employeesForSelectedClient.reduce((sum, item) => {
+                                  const breakdown = item.clientBreakdown?.find(b => b.clientId === currentSelectedTab);
+                                  return sum + (breakdown?.amount || 0);
+                                }, 0).toFixed(2)}
+                              </strong>
+                            </TableCell>
+                          </TableRow>
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  </Paper>
+                )}
+              </Box>
+            );
+          })()}
+
           {/* Action Buttons */}
-          <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
+          <Box 
+            sx={{ 
+              display: 'flex', 
+              gap: 2, 
+              justifyContent: 'center',
+              flexWrap: 'wrap',
+              '@media print': {
+                display: 'none'
+              }
+            }}
+          >
             <Button
               variant="outlined"
-              onClick={() => setShowReviewPanel(false)}
+              onClick={() => {
+                setShowReviewPanel(false);
+                setSelectedClientTab(null);
+              }}
               size="large"
             >
               ← Go Back & Edit
             </Button>
             <Button
+              variant="outlined"
+              color="primary"
+              onClick={() => {
+                // Close review panel but keep all data intact
+                setShowReviewPanel(false);
+                setSelectedClientTab(null);
+                // Data remains in tabData and inputs, so user can continue editing
+              }}
+              size="large"
+            >
+              Continue Reviewing
+            </Button>
+            <Button
               variant="contained"
               onClick={() => {
                 setShowReviewPanel(false);
+                setSelectedClientTab(null);
                 handleCreateChecks();
               }}
               disabled={isCreatingChecks}
               size="large"
-                              startIcon={<span></span>}
+              startIcon={<span></span>}
             >
               {isCreatingChecks ? "Creating Checks..." : "Create Checks"}
             </Button>
