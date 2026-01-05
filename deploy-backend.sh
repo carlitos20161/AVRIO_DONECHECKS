@@ -28,3 +28,11 @@ echo "🔗 Get the service URL with: gcloud run services describe $SERVICE_NAME 
 
 
 
+
+
+
+
+
+
+
+
