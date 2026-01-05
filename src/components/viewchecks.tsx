@@ -29,6 +29,7 @@ import { db, auth } from '../firebase';
 import { useLocation } from 'react-router-dom';
 import { TextField } from '@mui/material';
 import { getApiUrl } from '../config';
+import { logger } from '../utils/logger';
 
 
 interface Company {
@@ -77,6 +78,19 @@ interface ChecksProps {
   currentRole: string;
   companyIds?: string[];
 }
+
+// Helper function to get ISO week number
+const getISOWeek = (date: Date): number => {
+  const d = new Date(date.getTime());
+  d.setHours(0, 0, 0, 0);
+  // Thursday in current week decides the year
+  d.setDate(d.getDate() + 3 - (d.getDay() + 6) % 7);
+  // January 4 is always in week 1
+  const week1 = new Date(d.getFullYear(), 0, 4);
+  // Adjust to Thursday in week 1 and count weeks
+  const week = 1 + Math.round(((d.getTime() - week1.getTime()) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
+  return week;
+};
 
 const Checks: React.FC<ChecksProps> = ({ filter, onClearFilter }) => {
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -197,7 +211,7 @@ const handleMarkCheckReviewed = async () => {
   // Smart refresh when selectedCompanyId changes (user clicks on a company)
   useEffect(() => {
     if (selectedCompanyId) {
-      console.log('Company selected, refreshing checks');
+      logger.log('Company selected, refreshing checks');
       setForceRefresh(prev => prev + 1);
     }
   }, [selectedCompanyId]);
@@ -296,23 +310,23 @@ const handleMarkCheckReviewed = async () => {
   useEffect(() => {
     const fetchChecks = async () => {
       if (!auth.currentUser || !currentRole) {
-        console.log('⏳ Waiting for auth and role...');
+        logger.log('⏳ Waiting for auth and role...');
         return;
       }
 
       // Cache check - don't refetch if we just fetched in the last 2 seconds
       const now = Date.now();
       if (now - lastFetchTime < 2000 && forceRefresh === 0) {
-        console.log('⏭️ Skipping fetch - data is fresh');
+        logger.log('⏭️ Skipping fetch - data is fresh');
         return;
       }
 
       // If force refresh is active, clear the cache
       if (forceRefresh > 0) {
-        console.log('🔄 Force refresh active, bypassing cache');
+        logger.log('🔄 Force refresh active, bypassing cache');
       }
 
-      console.log('🚀 Fetching checks...');
+      logger.log('🚀 Fetching checks...');
       const startTime = performance.now();
 
       // Build server-side query for better performance
@@ -331,7 +345,7 @@ const handleMarkCheckReviewed = async () => {
 
       // Only fetch if we have a company selected or a filter
       if (!companyToFilter && !filter?.companyId) {
-        console.log('⏭️ No company selected, skipping fetch');
+        logger.log('⏭️ No company selected, skipping fetch');
         return;
       }
 
@@ -357,7 +371,7 @@ const handleMarkCheckReviewed = async () => {
       }
 
       const endTime = performance.now();
-      console.log(`✅ Fetched ${filtered.length} checks in ${(endTime - startTime).toFixed(2)}ms`);
+      logger.log(`✅ Fetched ${filtered.length} checks in ${(endTime - startTime).toFixed(2)}ms`);
       
       setChecks(filtered);
       setLastFetchTime(Date.now());
@@ -603,7 +617,7 @@ const handleMarkCheckReviewed = async () => {
               <Button
                 variant="outlined"
                 onClick={() => {
-                  console.log('🔄 Manual refresh triggered');
+                  logger.log('🔄 Manual refresh triggered');
                   setForceRefresh(prev => prev + 1);
                 }}
               >
@@ -633,10 +647,16 @@ const handleMarkCheckReviewed = async () => {
           {sortedWeekKeys.length === 0 ? (
             <Typography>No checks found for this company.</Typography>
           ) : (
-            sortedWeekKeys.map(weekKey => (
+            sortedWeekKeys.map(weekKey => {
+              // Calculate work week number (pay week = current week - 1)
+              const weekKeyDate = new Date(weekKey);
+              const currentWeekNumber = getISOWeek(weekKeyDate);
+              const payWeekNumber = currentWeekNumber - 1;
+              
+              return (
               <Paper key={weekKey} sx={{ p: 2, mb: 3 }}>
                 <Typography variant="subtitle1" fontWeight="bold">
-                  Week starting: {weekKey}
+                  Pay Week {payWeekNumber} - Week starting: {weekKey}
                 </Typography>
 
                 {currentRole === 'admin' ? (
@@ -733,7 +753,8 @@ const handleMarkCheckReviewed = async () => {
 
 
               </Paper>
-            ))
+              );
+            })
           )}
         </>
       )}

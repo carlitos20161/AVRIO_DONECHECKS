@@ -19,6 +19,7 @@ import {
 } from '@mui/material';
 import ExpandLess from '@mui/icons-material/ExpandLess';
 import ExpandMore from '@mui/icons-material/ExpandMore';
+import MenuIcon from '@mui/icons-material/Menu';
 import CreateIcon from '@mui/icons-material/Create';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import ReceiptIcon from '@mui/icons-material/Receipt';
@@ -30,11 +31,13 @@ import PeopleIcon from '@mui/icons-material/People';
 import GroupIcon from '@mui/icons-material/Group';
 import WorkIcon from '@mui/icons-material/Work';
 import UploadIcon from '@mui/icons-material/CloudUpload';
+import IconButton from '@mui/material/IconButton';
 
 import { onAuthStateChanged, signOut, User as FirebaseUser } from 'firebase/auth';
 import { auth } from './firebase';
-import { doc, getDoc, setDoc, collection, query, where, getDocs, updateDoc, orderBy, limit } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, query, where, getDocs, updateDoc, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db } from './firebase';
+import { saveLoginTime, clearLoginTime, isSessionExpired, getFormattedTimeRemaining, getLoginTime } from './utils/sessionTimeout';
 
 import Login from './Login';
 import Clients from './components/Clients';
@@ -50,6 +53,7 @@ import Report from './components/Report';
 import InsertData from './components/InsertData';
 import Notifications from './components/Notifications';
 import { useOptimizedData } from './hooks/useOptimizedData';
+import { logger } from './utils/logger';
 
 const drawerWidth = 220;
 
@@ -67,14 +71,14 @@ const createSubMenuItems = [
   { text: 'Users', icon: <PeopleIcon />, section: 'Users' },
   { text: 'Department', icon: <GroupIcon />, section: 'Clients' },
   { text: 'Employees', icon: <WorkIcon />, section: 'Employees' },
-  { text: 'Insert Data', icon: <UploadIcon />, section: 'InsertData' },
+  { text: 'Insert Data', icon: <UploadIcon />, section: 'InsertData', adminOnly: true },
 ];
 const ensureUserDocExists = async (user: FirebaseUser) => {
   const userRef = doc(db, 'users', user.uid);
   const docSnap = await getDoc(userRef);
 
   if (!docSnap.exists()) {
-    console.warn('🆕 No user doc found. Creating one...');
+    logger.warn('🆕 No user doc found. Creating one...');
     await setDoc(userRef, {
       role: 'user',
       active: true,
@@ -82,7 +86,7 @@ const ensureUserDocExists = async (user: FirebaseUser) => {
       companyIds: [], // You can update this based on app logic
     });
   } else {
-    console.log('✅ User doc already exists');
+    logger.log('✅ User doc already exists');
   }
 };
 
@@ -97,6 +101,7 @@ function App() {
   const [visibleClientIds, setVisibleClientIds] = useState<string[]>([]); // Track which clients user can see
   const [userId, setUserId] = useState<string | null>(null);
   const [createSubmenuOpen, setCreateSubmenuOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   const [navigatedFromDashboard, setNavigatedFromDashboard] = useState(false);
 
@@ -132,7 +137,7 @@ function App() {
 
   // clear filter
   const handleClearFilter = () => {
-    console.log('🧹 handleClearFilter called, resetting filter');
+    logger.log('🧹 handleClearFilter called, resetting filter');
     setViewFilter({});
     setSelectedSection('View Checks');
   };
@@ -191,11 +196,19 @@ function App() {
       setSelectedSection('Dashboard');
     }
   }, [selectedSection, currentRole]);
+
+  // Redirect non-admin users away from InsertData section
+  useEffect(() => {
+    if (selectedSection === 'InsertData' && currentRole !== 'admin') {
+      setSelectedSection('Dashboard');
+    }
+  }, [selectedSection, currentRole]);
    
   useEffect(() => {
-    console.log('setting up auth listener');
+    logger.log('setting up auth listener');
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      console.log('onAuthStateChanged', firebaseUser);
+      logger.log('onAuthStateChanged', firebaseUser);
+      
       // Always clear state first!
       setUser(firebaseUser);
       setCurrentRole('user');
@@ -205,6 +218,50 @@ function App() {
       setViewFilter({});
       setSelectedSection('Dashboard');
       if (firebaseUser) {
+        // On successful login, always save a fresh login time
+        // The Login component already calls saveLoginTime(), but we ensure it's set here too
+        // This handles cases where the auth state changes but login flow didn't complete
+        const existingLoginTime = getLoginTime();
+        
+        // If there's an existing login time, check if it's expired
+        // BUT: Only log out if it's been more than 1 minute since that login time
+        // This prevents immediately logging out users who just logged in (race condition)
+        if (existingLoginTime) {
+          const timeSinceLogin = Date.now() - existingLoginTime;
+          const oneMinute = 60 * 1000;
+          
+          // Only check expiration if it's been more than 1 minute since login
+          // This prevents false positives from stale localStorage or timing issues
+          if (timeSinceLogin > oneMinute && isSessionExpired()) {
+            logger.warn('Session expired. Logging out user.');
+            clearLoginTime();
+            await signOut(auth);
+            setUser(null);
+            setAuthChecked(true);
+            return;
+          }
+          
+          // If login time exists and is recent (less than 1 minute), it's a fresh login
+          // Don't overwrite it, just continue
+          if (timeSinceLogin <= oneMinute) {
+            logger.log('Fresh login detected, skipping session check');
+          }
+        } else {
+          // No existing login time - this is a fresh login, save it
+          saveLoginTime();
+        }
+        
+        // If login time is very old (more than 23 hours), refresh it
+        // This handles edge cases where localStorage might have stale data
+        if (existingLoginTime) {
+          const timeSinceLogin = Date.now() - existingLoginTime;
+          const twentyThreeHours = 23 * 60 * 60 * 1000;
+          if (timeSinceLogin > twentyThreeHours) {
+            logger.log('Login time is very old, refreshing it');
+            saveLoginTime();
+          }
+        }
+        
         try {
           await ensureUserDocExists(firebaseUser); 
           const docSnap = await getDoc(doc(db, 'users', firebaseUser.uid));
@@ -214,19 +271,20 @@ function App() {
             setUserId(firebaseUser.uid);
             setCompanyIds(data.companyIds || []);
             setVisibleClientIds(data.visibleClientIds || []); // Load visible client IDs
-            console.log('[CHECKPOINT] User doc loaded:', data);
+            logger.log('[CHECKPOINT] User doc loaded:', data);
             
             // Fetch notifications after user data is loaded
             setTimeout(() => fetchAndShowNotifications(), 1000);
           } else {
-            console.warn('[CHECKPOINT] User doc not found for uid:', firebaseUser.uid);
+            logger.warn('[CHECKPOINT] User doc not found for uid:', firebaseUser.uid);
           }
         } catch (err) {
           console.error('[CHECKPOINT] Error fetching user doc:', err);
         }
       } else {
-        console.log('user signed out');
+        logger.log('user signed out');
         setCurrentRole('user');
+        clearLoginTime(); // Clear session timer on logout
       }
       setAuthChecked(true);
       if (typeof refetchChecks === 'function') refetchChecks();
@@ -234,20 +292,71 @@ function App() {
     return () => unsubscribe();
   }, []);
 
-  // Load user info once
+  // Real-time listener for current user's active status
   useEffect(() => {
-    const fetchUser = async () => {
-      const user = auth.currentUser;
-      if (!user) return;
-      const userSnap = await getDoc(doc(db, 'users', user.uid));
-      if (!userSnap.exists()) return;
-      const userData = userSnap.data();
+    if (!user) return;
+
+    logger.log('🔍 Setting up real-time listener for user active status');
+    const userDocRef = doc(db, 'users', user.uid);
+    
+    const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
+      if (!docSnap.exists()) {
+        logger.warn('User document not found, logging out');
+        signOut(auth);
+        setUser(null);
+        showNotification('Your account was not found. Please contact support.', 'error');
+        return;
+      }
+
+      const userData = docSnap.data();
+      const isActive = userData.active !== false; // Default to true if not set
+      
+      if (!isActive) {
+        logger.warn('⚠️ User became inactive, logging out immediately');
+        signOut(auth);
+        setUser(null);
+        showNotification('Your account has been deactivated. Please contact your administrator.', 'warning');
+        return;
+      }
+
+      // Update user data in real-time
       setCurrentRole(userData.role || 'user');
       setCompanyIds(userData.companyIds || []);
-      setVisibleClientIds(userData.visibleClientIds || []); // Load visible client IDs
+      setVisibleClientIds(userData.visibleClientIds || []);
+      logger.log('✅ User data updated in real-time:', userData);
+    }, (error) => {
+      console.error('Error listening to user document:', error);
+    });
+
+    return () => {
+      logger.log('🔍 Cleaning up user active status listener');
+      unsubscribe();
     };
-    fetchUser();
-  }, []);
+  }, [user]);
+
+  // Session timeout check - runs every minute
+  useEffect(() => {
+    if (!user) return;
+
+    const checkSessionTimeout = async () => {
+      if (isSessionExpired()) {
+        logger.warn('Session expired after 24 hours. Logging out...');
+        clearLoginTime();
+        await signOut(auth);
+        setUser(null);
+        setCurrentRole('user');
+        showNotification('Your session has expired. Please log in again.', 'warning');
+      }
+    };
+
+    // Check immediately
+    checkSessionTimeout();
+
+    // Check every minute
+    const interval = setInterval(checkSessionTimeout, 60000); // 60 seconds
+
+    return () => clearInterval(interval);
+  }, [user]);
 
   // Memoize options for useOptimizedData
   const usersOptions = useMemo(() => {
@@ -283,7 +392,7 @@ function App() {
       ? { companyId: companyIds }
       : {});
 
-  console.log('[CHECKPOINT] [App] Dashboard checks filter:', checksFilter, 'currentRole:', currentRole, 'companyIds:', companyIds);
+  logger.log('[CHECKPOINT] [App] Dashboard checks filter:', checksFilter, 'currentRole:', currentRole, 'companyIds:', companyIds);
   const { data: checks, loading: checksLoading, refetch: refetchChecks } = useOptimizedData<any>(
     'checks',
     checksFilter,
@@ -291,7 +400,8 @@ function App() {
   );
 
   const handleLogout = async () => {
-    console.log('handleLogout called');
+    logger.log('handleLogout called');
+    clearLoginTime(); // Clear session timer
     await signOut(auth);
     setUser(null);
     setCurrentRole('user');
@@ -316,12 +426,12 @@ function App() {
 
   if (!authChecked) return null;
   if (!user) {
-    console.log('🛑 not logged in, showing login');
+    logger.log('🛑 not logged in, showing login');
     return <Login onLogin={() => setUser(auth.currentUser)} />;
   }
   // Only render main app after user info is loaded
   if (!authChecked || !user) {
-    console.log('🛑 not logged in, showing login');
+    logger.log('🛑 not logged in, showing login');
     return <Login onLogin={() => setUser(auth.currentUser)} />;
   }
 
@@ -329,7 +439,7 @@ function App() {
     currentRole !== 'admin' && (!companyIds || !Array.isArray(companyIds) || companyIds.length === 0);
 
   if (stillLoadingData) {
-    console.log('⏳ Waiting for companyIds to load...');
+    logger.log('⏳ Waiting for companyIds to load...');
     return (
       <Box sx={{ p: 4, display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 300 }}>
         <CircularProgress />
@@ -344,14 +454,23 @@ function App() {
   //   ? [...mainMenuItems, ...createSubMenuItems]
   //   : [...mainMenuItems, { text: 'Employees', icon: <WorkIcon />, section: 'Employees' }];
 
-  console.log('🔎 rendering App, selectedSection=', selectedSection);
-  console.log('🔎 current viewFilter=', viewFilter);
+  logger.log('🔎 rendering App, selectedSection=', selectedSection);
+  logger.log('🔎 current viewFilter=', viewFilter);
 
   return (
     <Box sx={{ display: 'flex' }}>
       <CssBaseline />
       <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
         <Toolbar>
+          <IconButton
+            color="inherit"
+            aria-label="open drawer"
+            edge="start"
+            onClick={() => setDrawerOpen(!drawerOpen)}
+            sx={{ mr: 2 }}
+          >
+            <MenuIcon />
+          </IconButton>
           <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1 }}>
             Payroll Checks
           </Typography>
@@ -366,7 +485,12 @@ function App() {
       </AppBar>
 
       <Drawer
-        variant="permanent"
+        variant="temporary"
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        ModalProps={{
+          keepMounted: true, // Better open performance on mobile.
+        }}
         sx={{
           width: drawerWidth,
           flexShrink: 0,
@@ -382,17 +506,18 @@ function App() {
                 key={item.section}
                 selected={selectedSection === item.section}
                   onClick={() => {
-                  console.log(`🖱️ Menu click: ${item.section}`);
+                  logger.log(`🖱️ Menu click: ${item.section}`);
                     if (
                     item.section === 'View Checks' &&
                       selectedSection !== 'View Checks' &&
                       Object.keys(viewFilter).length === 0
                     ) {
-                      console.log('🧹 Clearing viewFilter because menu clicked without active filter');
+                      logger.log('🧹 Clearing viewFilter because menu clicked without active filter');
                       setViewFilter({});
                     }
                     setNavigatedFromDashboard(false);
                   setSelectedSection(item.section);
+                  setDrawerOpen(false); // Close drawer when menu item is clicked
                   }}
                 >
                 <ListItemIcon>{item.icon}</ListItemIcon>
@@ -414,13 +539,22 @@ function App() {
                 
                 <Collapse in={createSubmenuOpen} timeout="auto" unmountOnExit>
                   <List component="div" disablePadding>
-                    {createSubMenuItems.map((item) => (
+                    {createSubMenuItems
+                      .filter(item => {
+                        // Show admin-only items only to admins
+                        if (item.adminOnly && currentRole !== 'admin') {
+                          return false;
+                        }
+                        return true;
+                      })
+                      .map((item) => (
                       <ListItemButton
                         key={item.section}
                         selected={selectedSection === item.section}
                         onClick={() => {
-                          console.log(`🖱️ Submenu click: ${item.section}`);
+                          logger.log(`🖱️ Submenu click: ${item.section}`);
                           setSelectedSection(item.section);
+                          setDrawerOpen(false); // Close drawer when submenu item is clicked
                         }}
                         sx={{ pl: 4 }}
                       >
@@ -438,8 +572,9 @@ function App() {
               <ListItemButton
                 selected={selectedSection === 'Employees'}
                 onClick={() => {
-                  console.log(`🖱️ Menu click: Employees`);
+                  logger.log(`🖱️ Menu click: Employees`);
                   setSelectedSection('Employees');
+                  setDrawerOpen(false); // Close drawer when menu item is clicked
                 }}
               >
                 <ListItemIcon><WorkIcon /></ListItemIcon>
@@ -452,12 +587,12 @@ function App() {
 
       <Box component="main" sx={{ flexGrow: 1, p: 3 }}>
         <Toolbar />
-        <Container>
+        <Container maxWidth={false} sx={{ width: '100%', maxWidth: '100%', px: 2 }}>
           {selectedSection === 'Dashboard' && (
             <Dashboard
               ref={dashboardRef}
               onGoToViewChecks={(companyId, weekKey, createdBy) => {
-                console.log('➡️ Dashboard → View Checks with filter', {
+                logger.log('➡️ Dashboard → View Checks with filter', {
                   companyId,
                   weekKey,
                   createdBy,
@@ -490,7 +625,7 @@ function App() {
           {selectedSection === 'Checks' && (
                             <BatchChecks onChecksCreated={refetchChecks} onGoToSection={setSelectedSection} />
           )}
-          {selectedSection === 'InsertData' && <InsertData />}
+          {selectedSection === 'InsertData' && currentRole === 'admin' && <InsertData />}
 
           {selectedSection === 'View Checks' && (
             <OptimizedViewChecks

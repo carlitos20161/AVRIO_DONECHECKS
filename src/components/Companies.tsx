@@ -31,6 +31,7 @@ import {
   Alert,
 } from "@mui/material";
 import { getDocs as getDocsFB, collection as collectionFB } from 'firebase/firestore';
+import { logger } from '../utils/logger';
 
 interface Company {
   id: string;
@@ -325,8 +326,8 @@ setClients(clList);
   };
 
   const handleViewProfile = async (company: Company) => {
-    console.log('🔍 DEBUG: Opening profile for company:', company);
-    console.log('🔍 DEBUG: Company divisions:', company.divisions);
+    logger.log('🔍 DEBUG: Opening profile for company:', company);
+    logger.log('🔍 DEBUG: Company divisions:', company.divisions);
     setProfileCompany(company);
     setProfileOpen(true);
     setProfileLoading(true);
@@ -363,8 +364,8 @@ setClients(clList);
   };
 
   const handleStartEdit = () => {
-    console.log('🔍 DEBUG: Edit Company button clicked!');
-    console.log('🔍 DEBUG: profileCompany:', profileCompany);
+    logger.log('🔍 DEBUG: Edit Company button clicked!');
+    logger.log('🔍 DEBUG: profileCompany:', profileCompany);
     if (profileCompany) {
       setEditName(profileCompany.name);
       setEditAddress(profileCompany.address);
@@ -373,8 +374,8 @@ setClients(clList);
       // This allows editing/deleting unused divisions like "Containers Per-Diem"
       const allCompanyDivisions = profileCompany.divisions || [];
       
-      console.log('🔍 DEBUG: All company divisions:', allCompanyDivisions);
-      console.log('🔍 DEBUG: Setting editDivisions to all company divisions:', allCompanyDivisions);
+      logger.log('🔍 DEBUG: All company divisions:', allCompanyDivisions);
+      logger.log('🔍 DEBUG: Setting editDivisions to all company divisions:', allCompanyDivisions);
       
       setEditDivisions(allCompanyDivisions);
       setEditLogoFile(profileCompany.logoBase64 || null);
@@ -394,39 +395,39 @@ setClients(clList);
 
   // Division management functions
   const handleAddDivision = () => {
-    console.log('🔍 DEBUG: Adding division:', newDivision.trim());
-    console.log('🔍 DEBUG: Current editDivisions:', editDivisions);
+    logger.log('🔍 DEBUG: Adding division:', newDivision.trim());
+    logger.log('🔍 DEBUG: Current editDivisions:', editDivisions);
     if (newDivision.trim() && !editDivisions.includes(newDivision.trim())) {
       const newEditDivisions = [...editDivisions, newDivision.trim()];
-      console.log('🔍 DEBUG: New editDivisions after add:', newEditDivisions);
+      logger.log('🔍 DEBUG: New editDivisions after add:', newEditDivisions);
       setEditDivisions(newEditDivisions);
       setNewDivision("");
       setShowDivisionForm(false);
     } else {
-      console.log('🔍 DEBUG: Division not added - empty or duplicate');
+      logger.log('🔍 DEBUG: Division not added - empty or duplicate');
     }
   };
 
   const handleRemoveDivision = (divisionToRemove: string) => {
-    console.log('🔍 DEBUG: Removing division:', divisionToRemove);
-    console.log('🔍 DEBUG: Current editDivisions before remove:', editDivisions);
+    logger.log('🔍 DEBUG: Removing division:', divisionToRemove);
+    logger.log('🔍 DEBUG: Current editDivisions before remove:', editDivisions);
     const newEditDivisions = editDivisions.filter(div => div !== divisionToRemove);
-    console.log('🔍 DEBUG: New editDivisions after remove:', newEditDivisions);
+    logger.log('🔍 DEBUG: New editDivisions after remove:', newEditDivisions);
     setEditDivisions(newEditDivisions);
   };
 
   const handleSaveEdit = async () => {
-    console.log('🔍 DEBUG: Save Changes button clicked!');
-    console.log('🔍 DEBUG: profileCompany:', profileCompany);
-    console.log('🔍 DEBUG: editName:', editName);
-    console.log('🔍 DEBUG: editDivisions:', editDivisions);
+    logger.log('🔍 DEBUG: Save Changes button clicked!');
+    logger.log('🔍 DEBUG: profileCompany:', profileCompany);
+    logger.log('🔍 DEBUG: editName:', editName);
+    logger.log('🔍 DEBUG: editDivisions:', editDivisions);
     
     if (!profileCompany || !editName.trim()) {
       showSnackbar("Please enter a company name", "error");
       return;
     }
     try {
-      console.log('🔍 DEBUG: Saving divisions to Firestore:', editDivisions);
+      logger.log('🔍 DEBUG: Saving divisions to Firestore:', editDivisions);
       await updateDoc(doc(db, "companies", profileCompany.id), {
         name: editName.trim(),
         address: editAddress.trim(),
@@ -434,7 +435,7 @@ setClients(clList);
         logoBase64: editLogoFile || "",
         updatedAt: serverTimestamp(),
       });
-      console.log('🔍 DEBUG: Successfully saved divisions to Firestore');
+      logger.log('🔍 DEBUG: Successfully saved divisions to Firestore');
       
       // Update local state
       setCompanies(prev => {
@@ -443,12 +444,12 @@ setClients(clList);
             ? { ...c, name: editName.trim(), address: editAddress.trim(), divisions: editDivisions, logoBase64: editLogoFile || "" }
             : c
         );
-        console.log('🔍 DEBUG: Updated companies array:', updatedCompanies.find(c => c.id === profileCompany.id));
+        logger.log('🔍 DEBUG: Updated companies array:', updatedCompanies.find(c => c.id === profileCompany.id));
         return updatedCompanies;
       });
       
       // Update profile company state
-      console.log('🔍 DEBUG: Updating profileCompany state with divisions:', editDivisions);
+      logger.log('🔍 DEBUG: Updating profileCompany state with divisions:', editDivisions);
       setProfileCompany(prev => prev ? {
         ...prev,
         name: editName.trim(),
@@ -456,7 +457,7 @@ setClients(clList);
         divisions: editDivisions,
         logoBase64: editLogoFile || ""
       } : null);
-      console.log('🔍 DEBUG: ProfileCompany state updated');
+      logger.log('🔍 DEBUG: ProfileCompany state updated');
       
       setIsEditing(false);
       showSnackbar("✅ Company updated successfully!", "success");
@@ -1146,7 +1147,7 @@ setClients(clList);
   // Get divisions from clients that belong to this company
   // Check different possible field names for division
   const clientDivisions = profileClients.map(client => {
-    console.log('🔍 DEBUG: Client data:', client);
+    logger.log('🔍 DEBUG: Client data:', client);
     // Try different possible field names for division
     return client.division || client.divisionName || client.clientDivision || client.name;
   }).filter(name => name);
@@ -1162,12 +1163,12 @@ setClients(clList);
   
   const divisionsToShow = isEditing ? editDivisions : uniqueCombinedDivisions;
   
-  console.log('🔍 DEBUG: Divisions to show:', divisionsToShow);
-  console.log('🔍 DEBUG: profileCompany divisions:', profileCompany?.divisions);
-  console.log('🔍 DEBUG: profileClients:', profileClients);
-  console.log('🔍 DEBUG: clientDivisions:', clientDivisions);
-  console.log('🔍 DEBUG: isEditing:', isEditing);
-  console.log('🔍 DEBUG: editDivisions:', editDivisions);
+  logger.log('🔍 DEBUG: Divisions to show:', divisionsToShow);
+  logger.log('🔍 DEBUG: profileCompany divisions:', profileCompany?.divisions);
+  logger.log('🔍 DEBUG: profileClients:', profileClients);
+  logger.log('🔍 DEBUG: clientDivisions:', clientDivisions);
+  logger.log('🔍 DEBUG: isEditing:', isEditing);
+  logger.log('🔍 DEBUG: editDivisions:', editDivisions);
   
   return divisionsToShow.length === 0 ? (
     <Typography variant="body2" color="text.secondary">No clients added yet.</Typography>

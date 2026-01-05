@@ -60,6 +60,7 @@ import {
   serverTimestamp,
   updateDoc,
 } from "firebase/firestore";
+import { logger } from '../utils/logger';
 
 interface Bank {
   id: string;
@@ -84,7 +85,7 @@ interface BankPageProps {
 }
 
 const BankPage: React.FC<BankPageProps> = ({ currentRole }) => {
-  console.log('🚀 BankPage component is rendering!');
+  logger.log('🚀 BankPage component is rendering!');
   
   const [banks, setBanks] = useState<Bank[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -294,7 +295,7 @@ const BankPage: React.FC<BankPageProps> = ({ currentRole }) => {
       
       // If no checks found by companyId, try alternative approaches
       if (bankChecks.length === 0) {
-        console.log(`[DEBUG] No checks found by companyId, trying alternative methods...`);
+        logger.log(`[DEBUG] No checks found by companyId, trying alternative methods...`);
         
         // Try to find checks that might reference this bank directly
         const directBankChecks = checks.filter((c: any) => {
@@ -304,15 +305,15 @@ const BankPage: React.FC<BankPageProps> = ({ currentRole }) => {
         });
         
         if (directBankChecks.length > 0) {
-          console.log(`[DEBUG] Found ${directBankChecks.length} checks by direct bank reference`);
+          logger.log(`[DEBUG] Found ${directBankChecks.length} checks by direct bank reference`);
           bankChecks = directBankChecks;
         }
         
         // Log all available check fields to understand the data structure
         if (checks.length > 0) {
-          console.log(`[DEBUG] Available check fields:`, Object.keys(checks[0]));
-          console.log(`[DEBUG] Sample check companyId:`, (checks[0] as any).companyId);
-          console.log(`[DEBUG] Sample check bankId:`, (checks[0] as any).bankId);
+          logger.log(`[DEBUG] Available check fields:`, Object.keys(checks[0]));
+          logger.log(`[DEBUG] Sample check companyId:`, (checks[0] as any).companyId);
+          logger.log(`[DEBUG] Sample check bankId:`, (checks[0] as any).bankId);
         }
       }
       
@@ -323,24 +324,24 @@ const BankPage: React.FC<BankPageProps> = ({ currentRole }) => {
           const checkB = parseInt(b.checkNumber?.toString() || '0');
           return checkB - checkA; // Descending order (highest first)
         });
-        console.log(`[DEBUG] Sorted checks by check number (highest to lowest)`);
+        logger.log(`[DEBUG] Sorted checks by check number (highest to lowest)`);
       }
       
-      console.log(`[DEBUG] Bank ${bank.bankName} (${bank.id}) has companyId: ${bank.companyId}`);
-      console.log(`[DEBUG] Total checks in system: ${checks.length}`);
-      console.log(`[DEBUG] Found ${bankChecks.length} checks for company ${bank.companyId}`);
+      logger.log(`[DEBUG] Bank ${bank.bankName} (${bank.id}) has companyId: ${bank.companyId}`);
+      logger.log(`[DEBUG] Total checks in system: ${checks.length}`);
+      logger.log(`[DEBUG] Found ${bankChecks.length} checks for company ${bank.companyId}`);
       
       if (bankChecks.length > 0) {
-        console.log(`[DEBUG] Sample check data:`, bankChecks[0]);
-        console.log(`[DEBUG] First check number:`, (bankChecks[0] as any).checkNumber);
-        console.log(`[DEBUG] Last check number:`, (bankChecks[bankChecks.length - 1] as any).checkNumber);
+        logger.log(`[DEBUG] Sample check data:`, bankChecks[0]);
+        logger.log(`[DEBUG] First check number:`, (bankChecks[0] as any).checkNumber);
+        logger.log(`[DEBUG] Last check number:`, (bankChecks[bankChecks.length - 1] as any).checkNumber);
       } else {
-        console.log(`[DEBUG] No checks found. Checking all checks for companyId pattern...`);
+        logger.log(`[DEBUG] No checks found. Checking all checks for companyId pattern...`);
         const allCompanyIds = Array.from(new Set(checks.map((c: any) => c.companyId).filter(Boolean)));
-        console.log(`[DEBUG] All companyIds found in checks:`, allCompanyIds);
-        console.log(`[DEBUG] Bank companyId: ${bank.companyId}`);
-        console.log(`[DEBUG] Bank companyId type:`, typeof bank.companyId);
-        console.log(`[DEBUG] Bank companyId length:`, bank.companyId ? bank.companyId.length : 'undefined');
+        logger.log(`[DEBUG] All companyIds found in checks:`, allCompanyIds);
+        logger.log(`[DEBUG] Bank companyId: ${bank.companyId}`);
+        logger.log(`[DEBUG] Bank companyId type:`, typeof bank.companyId);
+        logger.log(`[DEBUG] Bank companyId length:`, bank.companyId ? bank.companyId.length : 'undefined');
       }
       
       setProfileChecks(bankChecks);
@@ -455,7 +456,7 @@ const BankPage: React.FC<BankPageProps> = ({ currentRole }) => {
             boxShadow: 3
           }}
         >
-          + ADD BANK
+          ADD BANK
         </Button>
         )}
       </Box>

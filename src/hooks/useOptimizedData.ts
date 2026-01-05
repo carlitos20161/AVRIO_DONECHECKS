@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { collection, getDocs, query, where, onSnapshot, QuerySnapshot, DocumentData } from 'firebase/firestore';
 import { db } from '../firebase';
+import { logger } from '../utils/logger';
 
 // Enhanced and cleaned version (same logic, improved clarity)
 
@@ -32,8 +33,8 @@ export function useOptimizedData<T>(
 
       try {
         let q: any = collection(db, collectionName);
-        console.log('[useOptimizedData] filters:', filters);
-        console.log('[useOptimizedData] collectionName:', collectionName, 'options:', options);
+        logger.log('[useOptimizedData] filters:', filters);
+        logger.log('[useOptimizedData] collectionName:', collectionName, 'options:', options);
 
         // Handle large 'companyId in [...]' filters
         if (
@@ -42,7 +43,7 @@ export function useOptimizedData<T>(
           Array.isArray(filters.companyId) &&
           filters.companyId.length > 10
         ) {
-          console.log('[useOptimizedData] chunking companyId in query:', filters.companyId);
+          logger.log('[useOptimizedData] chunking companyId in query:', filters.companyId);
           const chunks: string[][] = [];
           for (let i = 0; i < filters.companyId.length; i += 10) {
             chunks.push(filters.companyId.slice(i, i + 10));
@@ -52,11 +53,11 @@ export function useOptimizedData<T>(
           let allDocs: any[] = [];
 
           chunks.forEach(chunk => {
-            console.log('[useOptimizedData] setting up chunk listener:', chunk);
+            logger.log('[useOptimizedData] setting up chunk listener:', chunk);
             const qChunk = query(collection(db, collectionName), where('companyId', 'in', chunk));
             
             const unsub = onSnapshot(qChunk, (snapshot: QuerySnapshot<DocumentData>) => {
-              console.log('[useOptimizedData] chunk listener update for', chunk, ':', snapshot.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
+              logger.log('[useOptimizedData] chunk listener update for', chunk, ':', snapshot.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
               
               // Merge all chunk results
               allDocs = [];
@@ -71,12 +72,12 @@ export function useOptimizedData<T>(
             snap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) }))
           );
 
-                  console.log('[useOptimizedData] allDocs after chunking:', mergedDocs);
+                  logger.log('[useOptimizedData] allDocs after chunking:', mergedDocs);
           
           if (collectionName === 'companies') {
                     mergedDocs.forEach(company => {
-              console.log(`[useOptimizedData] Chunked company ${company.id} data:`, company);
-              console.log(`[useOptimizedData] Chunked company ${company.id} divisions field:`, company.divisions);
+              logger.log(`[useOptimizedData] Chunked company ${company.id} data:`, company);
+              logger.log(`[useOptimizedData] Chunked company ${company.id} divisions field:`, company.divisions);
             });
           }
                   
@@ -125,10 +126,10 @@ export function useOptimizedData<T>(
             });
 
             qChunk = query(qChunk, where(inKey, 'in', chunk));
-            console.log('[useOptimizedData] setting up generic array chunk listener:', inKey, chunk);
+            logger.log('[useOptimizedData] setting up generic array chunk listener:', inKey, chunk);
             
             const unsub = onSnapshot(qChunk, (snapshot: QuerySnapshot<DocumentData>) => {
-              console.log('[useOptimizedData] generic chunk listener update for', chunk, ':', snapshot.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
+              logger.log('[useOptimizedData] generic chunk listener update for', chunk, ':', snapshot.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
               
               // Re-fetch all chunks to get complete data
               Promise.all(chunks.map(c => {
@@ -146,7 +147,7 @@ export function useOptimizedData<T>(
           const uniqueDocs = Array.from(new Map(allDocs.map(doc => [doc.id, doc])).values());
           const result = uniqueDocs.map(doc => ({ id: doc.id, ...(doc.data() as any) }));
 
-          console.log('[useOptimizedData] allDocs after generic chunking:', result);
+          logger.log('[useOptimizedData] allDocs after generic chunking:', result);
                   if (isMounted) {
                     setData(result as T[]);
                     setLoading(false);
@@ -168,16 +169,16 @@ export function useOptimizedData<T>(
           }
         });
 
-        console.log('[useOptimizedData] setting up real-time listener:', filters);
+        logger.log('[useOptimizedData] setting up real-time listener:', filters);
         
         unsubscribe = onSnapshot(q, (snapshot: QuerySnapshot<DocumentData>) => {
-          console.log('[useOptimizedData] real-time listener update:', snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) })));
+          logger.log('[useOptimizedData] real-time listener update:', snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) })));
           
         if (collectionName === 'companies') {
           snapshot.docs.forEach(doc => {
             const data = doc.data() as any;
-            console.log(`[useOptimizedData] Company ${doc.id} raw data:`, data);
-            console.log(`[useOptimizedData] Company ${doc.id} divisions field:`, data.divisions);
+            logger.log(`[useOptimizedData] Company ${doc.id} raw data:`, data);
+            logger.log(`[useOptimizedData] Company ${doc.id} divisions field:`, data.divisions);
           });
         }
         

@@ -31,6 +31,7 @@ import PersonAddIcon from '@mui/icons-material/PersonAdd';
 import PrintIcon from '@mui/icons-material/Print';
 import NotificationImportantIcon from '@mui/icons-material/NotificationImportant';
 import CloseIcon from '@mui/icons-material/Close';
+import WorkIcon from '@mui/icons-material/Work';
 import {
   collection,
   getDocs,
@@ -56,6 +57,7 @@ import {
   CartesianGrid
   // Tooltip is intentionally NOT imported from recharts
 } from "recharts";
+import { logger } from '../utils/logger';
 // Remove Grid import
 // import Grid from "@mui/material/Grid";
 
@@ -179,7 +181,7 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
           fetchedCompanyIds = data.companyIds || [];
         }
         setCompanyIds(fetchedCompanyIds);
-        console.log('[CHECKPOINT] Dashboard companyIds:', fetchedCompanyIds);
+        logger.log('[CHECKPOINT] Dashboard companyIds:', fetchedCompanyIds);
         // setCurrentRole(role); // Now passed as prop
 
         let checks: Check[] = [];
@@ -208,12 +210,12 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
               orderBy("date", "desc")
             );
             const snap = await getDocs(q);
-            console.log('[CHECKPOINT] Dashboard: fetched checks for chunk', chunk, snap.docs.map(d => d.id));
+            logger.log('[CHECKPOINT] Dashboard: fetched checks for chunk', chunk, snap.docs.map(d => d.id));
             snap.docs.forEach(d => {
               checks.push({ id: d.id, ...(d.data() as any) });
             });
           }
-          console.log('[CHECKPOINT] Dashboard: all fetched checks:', checks);
+          logger.log('[CHECKPOINT] Dashboard: all fetched checks:', checks);
         }
         setRecentChecks(checks.slice(0, 6));
       } catch (err) {
@@ -250,13 +252,13 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
   // Fetch all checks for admin users with real-time listener
   useEffect(() => {
     if (currentRole === 'admin') {
-      console.log('[Dashboard] Setting up real-time listener for checks');
+      logger.log('[Dashboard] Setting up real-time listener for checks');
       
       // Set up real-time listener for checks
       const unsubscribe = onSnapshot(collection(db, "checks"), (snap) => {
         try {
           setAllChecks(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
-          console.log('[Dashboard] Checks updated in real-time:', snap.docs.length);
+          logger.log('[Dashboard] Checks updated in real-time:', snap.docs.length);
         } catch (err) {
           console.error("Error processing checks:", err);
         }
@@ -266,7 +268,7 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
       
       // Cleanup listener on unmount
       return () => {
-        console.log('[Dashboard] Cleaning up checks listener');
+        logger.log('[Dashboard] Cleaning up checks listener');
         unsubscribe();
       };
     }
@@ -275,7 +277,7 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
   // Fetch pending reviews for admin users with real-time listener
   useEffect(() => {
     if (currentRole === 'admin') {
-      console.log('[Dashboard] Setting up real-time listener for review requests');
+      logger.log('[Dashboard] Setting up real-time listener for review requests');
       
       // Set up real-time listener for review requests
       const unsubscribe = onSnapshot(collection(db, "reviewRequest"), (reviewSnap) => {
@@ -290,7 +292,7 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
           const pendingChecksData = allChecks.filter(check => pendingCheckIds.includes(check.id));
           setPendingChecks(pendingChecksData);
           
-          console.log(`[DEBUG] Dashboard: Found ${pending.length} review requests and ${pendingChecksData.length} matching checks`);
+          logger.log(`[DEBUG] Dashboard: Found ${pending.length} review requests and ${pendingChecksData.length} matching checks`);
         } catch (err) {
           console.error("Error processing pending reviews:", err);
         }
@@ -300,7 +302,7 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
       
       // Cleanup listener on unmount
       return () => {
-        console.log('[Dashboard] Cleaning up review request listener');
+        logger.log('[Dashboard] Cleaning up review request listener');
         unsubscribe();
       };
     }
@@ -330,7 +332,7 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
         });
         await batch.commit();
 
-        console.log('Check approved successfully');
+        logger.log('Check approved successfully');
       } else {
         // REJECT: Delete the check and update check numbers
         const checkRef = doc(db, 'checks', checkId);
@@ -346,11 +348,11 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
 
         // Delete the check
         await deleteDoc(checkRef);
-        console.log('Check deleted from Firestore');
+        logger.log('Check deleted from Firestore');
 
         // Decrease subsequent check numbers if this check had a number
         if (checkNumber && companyId) {
-          console.log(`Deleting check #${checkNumber} for company ${companyId}`);
+          logger.log(`Deleting check #${checkNumber} for company ${companyId}`);
 
           // Get all checks for this company
           const allCompanyChecksQuery = query(
@@ -370,7 +372,7 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
               batch.update(docSnapshot.ref, {
                 checkNumber: newCheckNumber
               });
-              console.log(`Decreasing check #${currentCheckNumber} to #${newCheckNumber}`);
+              logger.log(`Decreasing check #${currentCheckNumber} to #${newCheckNumber}`);
             }
           });
 
@@ -389,12 +391,12 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
                 nextCheckNumber: newNextNumber
               });
               bankToUpdate = docSnapshot.ref;
-              console.log(`Updated bank nextCheckNumber from ${currentNextCheckNumber} to ${newNextNumber}`);
+              logger.log(`Updated bank nextCheckNumber from ${currentNextCheckNumber} to ${newNextNumber}`);
             }
           });
 
           await batch.commit();
-          console.log('Firestore batch update committed successfully');
+          logger.log('Firestore batch update committed successfully');
         }
 
         // Update the review request status to rejected
@@ -448,9 +450,9 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
         };
 
         await addDoc(collection(db, "notifications"), notificationData);
-        console.log('Notification created for rejected check with company and client details');
+        logger.log('Notification created for rejected check with company and client details');
 
-        console.log('Check rejected and deleted successfully');
+        logger.log('Check rejected and deleted successfully');
       }
 
       // Remove from pending lists
@@ -639,6 +641,21 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
                   </CardContent>
                 </Card>
               </ButtonBase>
+              <ButtonBase
+                sx={{ flex: '1 1 220px', minWidth: 220, maxWidth: 350, borderRadius: 3, display: 'block' }}
+                onClick={() => onGoToSection('Employees')}
+                focusRipple
+              >
+                <Card sx={{ p: 2, borderRadius: 3, background: 'linear-gradient(135deg, #7b1fa2 0%, #9c27b0 100%)', color: '#fff', boxShadow: '0 4px 20px rgba(123,31,162,0.3)' }}>
+                  <CardContent sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <WorkIcon sx={{ fontSize: 40 }} />
+                    <Box>
+                      <Typography variant="h6">Employees</Typography>
+                      <Typography variant="h4">{employees.length}</Typography>
+                    </Box>
+                  </CardContent>
+                </Card>
+              </ButtonBase>
             </Box>
           </>
         ) : (
@@ -806,18 +823,18 @@ const Dashboard = forwardRef<any, DashboardProps>(({ onGoToViewChecks, onGoToSec
                         variant="outlined"
                         color="primary"
                         onClick={() => {
-              console.log('🔍 [Dashboard] Opening details for check:', check);
-              console.log('🔍 [Dashboard] relationshipDetails:', check.relationshipDetails);
+              logger.log('🔍 [Dashboard] Opening details for check:', check);
+              logger.log('🔍 [Dashboard] relationshipDetails:', check.relationshipDetails);
               if (check.relationshipDetails && check.relationshipDetails.length > 0) {
-                console.log('🔍 [Dashboard] First relationship object:', check.relationshipDetails[0]);
+                logger.log('🔍 [Dashboard] First relationship object:', check.relationshipDetails[0]);
               }
-              console.log('🔍 [Dashboard] hours:', (check as any).hours);
-              console.log('🔍 [Dashboard] otHours:', (check as any).otHours);
-              console.log('🔍 [Dashboard] otRate:', (check as any).otRate);
-              console.log('🔍 [Dashboard] holidayHours:', (check as any).holidayHours);
-              console.log('🔍 [Dashboard] holidayRate:', (check as any).holidayRate);
-              console.log('🔍 [Dashboard] perDiemDays:', (check as any).perDiemDays);
-              console.log('🔍 [Dashboard] otherPay:', (check as any).otherPay);
+              logger.log('🔍 [Dashboard] hours:', (check as any).hours);
+              logger.log('🔍 [Dashboard] otHours:', (check as any).otHours);
+              logger.log('🔍 [Dashboard] otRate:', (check as any).otRate);
+              logger.log('🔍 [Dashboard] holidayHours:', (check as any).holidayHours);
+              logger.log('🔍 [Dashboard] holidayRate:', (check as any).holidayRate);
+              logger.log('🔍 [Dashboard] perDiemDays:', (check as any).perDiemDays);
+              logger.log('🔍 [Dashboard] otherPay:', (check as any).otherPay);
                           setSelectedCheckForDetails(check);
                         }}
                         sx={{ minWidth: '100px' }}

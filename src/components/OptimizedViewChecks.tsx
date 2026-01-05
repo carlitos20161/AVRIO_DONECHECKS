@@ -24,14 +24,31 @@ import {
   Alert,
   Avatar,
   FormControl,
+  FormControlLabel,
   InputLabel,
   Select,
   MenuItem,
-  Snackbar
+  Snackbar,
+  Fab,
+  Menu,
+  ListItemIcon,
+  ListItemText,
+  Card
 } from '@mui/material';
 import { auth } from '../firebase';
 import { useLocation } from 'react-router-dom';
-import { Delete as DeleteIcon } from '@mui/icons-material';
+import { 
+  Delete as DeleteIcon,
+  MoreVert,
+  Print,
+  FileDownload,
+  CheckCircle,
+  Send,
+  Settings,
+  Assignment as AssignmentIcon,
+  GroupWork as GroupWorkIcon,
+  Search as SearchIcon
+} from '@mui/icons-material';
 import {
   doc,
   updateDoc,
@@ -51,6 +68,7 @@ import { usePrintPermissions } from '../hooks/usePrintPermissions'; // ✅ Impor
 import { decryptData } from '../utils/encryption';  // Import decryptData function
 import Notifications from './Notifications';
 import { getApiUrl } from '../config';
+import { logger } from '../utils/logger';
 
 
 // Function to calculate ISO week number
@@ -67,6 +85,12 @@ const formatDateKey = (date: Date) => {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+};
+
+// Parse a YYYY-MM-DD date string as a local date (avoiding timezone issues)
+const parseDateKey = (dateKey: string): Date => {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  return new Date(year, month - 1, day);
 };
 
 const getStartOfWeek = (date: Date) => {
@@ -101,7 +125,7 @@ const getPastWeekKey = () => {
 
 // Get available years from weekKeys
 const getAvailableYears = (weekKeys: string[]) => {
-  const years = new Set(weekKeys.map(weekKey => new Date(weekKey).getFullYear().toString()));
+  const years = new Set(weekKeys.map(weekKey => parseDateKey(weekKey).getFullYear().toString()));
   return Array.from(years).sort((a, b) => parseInt(b) - parseInt(a));
 };
 interface Company {
@@ -128,6 +152,7 @@ interface CheckItem {
   paid?: boolean;
   clientId?: string;
   weekKey?: string;
+  workWeek?: string;
   perdiemAmount?: number;
   perdiemBreakdown?: boolean;
   perdiemMonday?: number;
@@ -168,6 +193,9 @@ interface CheckItem {
     description: string;
     amount: string;
   }>;
+  isExpense?: boolean; // Flag to indicate this is an expense check
+  expenseName?: string; // Name/description of the expense (for expense checks)
+  expenseDescription?: string; // Additional description for expense checks
 }
 
 interface Client {
@@ -215,12 +243,17 @@ const OptimizedViewChecks: React.FC<ChecksProps> = ({ filter, onClearFilter, use
   
   // Admin review floating menu states
   const [showReviewMenu, setShowReviewMenu] = useState(false);
+  
+  // Floating action menu state
+  const [actionMenuAnchor, setActionMenuAnchor] = useState<null | HTMLElement>(null);
+  const actionMenuOpen = Boolean(actionMenuAnchor);
   const [pendingReviewChecks, setPendingReviewChecks] = useState<CheckItem[]>([]);
   const [reviewMenuPosition, setReviewMenuPosition] = useState({ x: 0, y: 0 });
   const [openDialog, setOpenDialog] = useState(false);
   const [selectedChecks, setSelectedChecks] = useState<Set<string>>(new Set());
   const [selectedCheck, setSelectedCheck] = useState<CheckItem | null>(null);
   const [openPendingChecksDialog, setOpenPendingChecksDialog] = useState(false);
+  const [openedFromPendingChecks, setOpenedFromPendingChecks] = useState(false);
   const [clients, setClients] = useState<Client[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [showBulkReviewConfirm, setShowBulkReviewConfirm] = useState(false);
@@ -239,6 +272,9 @@ const [userLoaded, setUserLoaded] = useState(false);
 
   // Add a state to track if we are in 'review only' mode (admin only)
   const [reviewOnly, setReviewOnly] = useState(false);
+  
+  // Add a state to filter expense checks separately
+  const [showExpenseChecks, setShowExpenseChecks] = useState<boolean | null>(null); // null = show all, true = only expenses, false = exclude expenses
 
   // Snackbar notification state
   const [snackbarOpen, setSnackbarOpen] = useState(false);
@@ -264,10 +300,10 @@ const [userLoaded, setUserLoaded] = useState(false);
   // When filter with companyId and weekKey is set, enable reviewOnly mode
   useEffect(() => {
     if (filter && filter.companyId && filter.weekKey && currentRole === 'admin') {
-      console.log('[DEBUG] Filter detected, enabling reviewOnly mode for admin');
+      logger.log('[DEBUG] Filter detected, enabling reviewOnly mode for admin');
       setReviewOnly(true);
     } else {
-      console.log('[DEBUG] No filter or not admin, reviewOnly mode disabled');
+      logger.log('[DEBUG] No filter or not admin, reviewOnly mode disabled');
       setReviewOnly(false);
     }
   }, [filter, currentRole]);
@@ -404,21 +440,21 @@ const [userLoaded, setUserLoaded] = useState(false);
   // Add effect to sync filter prop to state
   useEffect(() => {
     if (filter) {
-      console.log('[DEBUG] Filter received:', filter);
+      logger.log('[DEBUG] Filter received:', filter);
       if (filter.companyId && typeof filter.companyId === 'string' && filter.companyId !== selectedCompanyId) {
-        console.log('[DEBUG] Setting selectedCompanyId from filter:', filter.companyId);
+        logger.log('[DEBUG] Setting selectedCompanyId from filter:', filter.companyId);
         setSelectedCompanyId(filter.companyId);
         // Reset week selection when company changes
         setSelectedWeekKey(null);
         setIsSelectingWeek(false);
       }
       if (filter.weekKey && filter.weekKey !== selectedWeekKey) {
-        console.log('[DEBUG] Setting selectedWeekKey from filter:', filter.weekKey);
+        logger.log('[DEBUG] Setting selectedWeekKey from filter:', filter.weekKey);
         setSelectedWeekKey(filter.weekKey);
         setIsSelectingWeek(false);
       }
       if (filter.createdBy && filter.createdBy !== selectedCreatedBy) {
-        console.log('[DEBUG] Setting selectedCreatedBy from filter:', filter.createdBy);
+        logger.log('[DEBUG] Setting selectedCreatedBy from filter:', filter.createdBy);
         setSelectedCreatedBy(filter.createdBy);
       }
     }
@@ -429,9 +465,9 @@ const [userLoaded, setUserLoaded] = useState(false);
   const handleSendForReview = async (check: CheckItem, weekKey: string) => {
     try {
       const currentUser = auth.currentUser;
-      console.log('[DEBUG] handleSendForReview - currentUser:', currentUser?.uid);
-      console.log('[DEBUG] handleSendForReview - check:', check.id, check.companyId);
-      console.log('[DEBUG] handleSendForReview - weekKey:', weekKey);
+      logger.log('[DEBUG] handleSendForReview - currentUser:', currentUser?.uid);
+      logger.log('[DEBUG] handleSendForReview - check:', check.id, check.companyId);
+      logger.log('[DEBUG] handleSendForReview - weekKey:', weekKey);
       
       if (!currentUser) {
         alert("❌ You must be logged in to send review requests");
@@ -447,10 +483,10 @@ const [userLoaded, setUserLoaded] = useState(false);
         status: "pending"
       };
       
-      console.log('[DEBUG] handleSendForReview - reviewRequestData:', reviewRequestData);
+      logger.log('[DEBUG] handleSendForReview - reviewRequestData:', reviewRequestData);
       
       const docRef = await addDoc(collection(db, "reviewRequest"), reviewRequestData);
-      console.log('[DEBUG] handleSendForReview - created doc with ID:', docRef.id);
+      logger.log('[DEBUG] handleSendForReview - created doc with ID:', docRef.id);
       
       // Add check to sent for review set
       setChecksSentForReview(prev => new Set(prev).add(check.id));
@@ -499,7 +535,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         return;
       }
 
-      console.log(`[DEBUG] Sending ${checksToSend.length} selected checks for review`);
+      logger.log(`[DEBUG] Sending ${checksToSend.length} selected checks for review`);
 
       // Create review requests for all selected checks
       const batch = writeBatch(db);
@@ -570,7 +606,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         return;
       }
 
-      console.log(`[DEBUG] Sending ${unreviewedChecks.length} unreviewed checks for review`);
+      logger.log(`[DEBUG] Sending ${unreviewedChecks.length} unreviewed checks for review`);
 
       // Create review requests for all unreviewed checks
       const batch = writeBatch(db);
@@ -664,7 +700,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         return;
       }
 
-      console.log(`[DEBUG] Deleting ${bulkDeleteChecks.length} selected checks`);
+      logger.log(`[DEBUG] Deleting ${bulkDeleteChecks.length} selected checks`);
 
       // Delete all selected checks
       const batch = writeBatch(db);
@@ -730,7 +766,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         }
       }
 
-      console.log('[OptimizedViewChecks] 🗑️ Deleting check:', checkToDelete.id);
+      logger.log('[OptimizedViewChecks] 🗑️ Deleting check:', checkToDelete.id);
 
       // Get the check document from Firestore
       const checkRef = doc(db, 'checks', checkToDelete.id);
@@ -746,11 +782,11 @@ const [userLoaded, setUserLoaded] = useState(false);
 
       // Delete the check
       await deleteDoc(checkRef);
-      console.log('[OptimizedViewChecks] ✅ Check deleted from Firestore');
+      logger.log('[OptimizedViewChecks] Check deleted from Firestore');
 
       // Decrease subsequent check numbers if this check had a number
       if (checkNumber && companyId) {
-        console.log(`🔍 DEBUG: Deleted check #${checkNumber} for company ${companyId}`);
+        logger.log(`[DEBUG] Deleted check #${checkNumber} for company ${companyId}`);
 
         // Get all checks for this company first (avoid composite index requirement)
         const companyChecksQuery = query(
@@ -774,7 +810,7 @@ const [userLoaded, setUserLoaded] = useState(false);
               checkNumber: newCheckNumber
             });
             
-            console.log(`🔍 DEBUG: Will decrease check #${currentCheckNumber} to #${newCheckNumber}`);
+            logger.log(`[DEBUG] Will decrease check #${currentCheckNumber} to #${newCheckNumber}`);
           }
         });
 
@@ -792,13 +828,13 @@ const [userLoaded, setUserLoaded] = useState(false);
             batch.update(docSnapshot.ref, {
               nextCheckNumber: newNextNumber
             });
-            console.log(`🔍 DEBUG: Will update bank nextCheckNumber from ${currentNextNumber} to ${newNextNumber}`);
+            logger.log(`[DEBUG] Will update bank nextCheckNumber from ${currentNextNumber} to ${newNextNumber}`);
           }
         });
 
         // Commit all updates
         await batch.commit();
-        console.log('[OptimizedViewChecks] ✅ Check numbers updated');
+        logger.log('[OptimizedViewChecks] Check numbers updated');
       }
 
       setSnackbarMessage('✅ Check deleted successfully!');
@@ -868,7 +904,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         return;
       }
 
-      console.log(`[DEBUG] Bulk marking ${bulkReviewData.count} checks as reviewed`);
+      logger.log(`[DEBUG] Bulk marking ${bulkReviewData.count} checks as reviewed`);
 
       let checksToReview: CheckItem[] = [];
       
@@ -902,7 +938,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         });
         await batch.commit();
         
-        console.log(`[DEBUG] Successfully marked ${checksToReview.length} checks as reviewed`);
+        logger.log(`[DEBUG] Successfully marked ${checksToReview.length} checks as reviewed`);
       } else {
         // Non-admin: create review requests
         const reviewRequests = checksToReview.map((check: CheckItem) => ({
@@ -921,7 +957,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         });
         await batch.commit();
         
-        console.log(`[DEBUG] Successfully created ${reviewRequests.length} review requests`);
+        logger.log(`[DEBUG] Successfully created ${reviewRequests.length} review requests`);
       }
       
       // Clear selections if this was for selected checks
@@ -1013,7 +1049,7 @@ const [userLoaded, setUserLoaded] = useState(false);
       });
       await batch.commit();
       
-      console.log(`[DEBUG] Successfully created ${reviewRequests.length} review requests for user-created checks`);
+      logger.log(`[DEBUG] Successfully created ${reviewRequests.length} review requests for user-created checks`);
       alert(`✅ Successfully sent ${reviewRequests.length} user-created checks for admin review!`);
       
       // Refresh the checks data
@@ -1065,7 +1101,7 @@ const [userLoaded, setUserLoaded] = useState(false);
       setShowBulkReviewConfirm(true);
       return; // Exit early, the actual review will happen in executeBulkReview
 
-      console.log(`[DEBUG] Reviewing ${checksToReview.length} selected checks`);
+      logger.log(`[DEBUG] Reviewing ${checksToReview.length} selected checks`);
 
       if (currentRole === 'admin') {
         // Admin: directly update the reviewed field
@@ -1076,7 +1112,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         });
         await batch.commit();
         
-        console.log(`[DEBUG] Successfully marked ${checksToReview.length} checks as reviewed`);
+        logger.log(`[DEBUG] Successfully marked ${checksToReview.length} checks as reviewed`);
         alert(`✅ Successfully marked ${checksToReview.length} selected checks as reviewed!`);
       } else {
         // Non-admin: create review requests
@@ -1096,7 +1132,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         });
         await batch.commit();
         
-        console.log(`[DEBUG] Successfully created ${reviewRequests.length} review requests`);
+        logger.log(`[DEBUG] Successfully created ${reviewRequests.length} review requests`);
         alert(`✅ Successfully sent ${reviewRequests.length} selected checks for review!`);
       }
       
@@ -1137,17 +1173,17 @@ const [userLoaded, setUserLoaded] = useState(false);
   // Update visibleCompanies logic
   useEffect(() => {
     if (!userLoaded) return;
-    console.log('[DEBUG] visibleCompanies - currentRole:', currentRole);
-    console.log('[DEBUG] visibleCompanies - companies:', companies.map(c => ({ id: c.id, name: c.name })));
-    console.log('[DEBUG] visibleCompanies - companyIds:', companyIds);
+    logger.log('[DEBUG] visibleCompanies - currentRole:', currentRole);
+    logger.log('[DEBUG] visibleCompanies - companies:', companies.map(c => ({ id: c.id, name: c.name })));
+    logger.log('[DEBUG] visibleCompanies - companyIds:', companyIds);
     
     if (currentRole === 'admin') {
       setVisibleCompanies(companies);
-      console.log('[DEBUG] visibleCompanies - admin: showing all companies');
+      logger.log('[DEBUG] visibleCompanies - admin: showing all companies');
     } else {
       const filtered = companies.filter(c => companyIds.includes(c.id));
       setVisibleCompanies(filtered);
-      console.log('[DEBUG] visibleCompanies - user: filtered companies:', filtered.map(c => ({ id: c.id, name: c.name })));
+      logger.log('[DEBUG] visibleCompanies - user: filtered companies:', filtered.map(c => ({ id: c.id, name: c.name })));
     }
   }, [userLoaded, currentRole, companies, companyIds]);
 
@@ -1160,20 +1196,20 @@ const [userLoaded, setUserLoaded] = useState(false);
     const pendingWeekFilter = localStorage.getItem('pendingWeekFilter');
     
     if (pendingCompanyFilter) {
-      console.log('[DEBUG] Found pending company filter:', pendingCompanyFilter);
+      logger.log('[DEBUG] Found pending company filter:', pendingCompanyFilter);
       setSelectedCompanyId(pendingCompanyFilter);
       localStorage.removeItem('pendingCompanyFilter');
       
       // If there's also a client filter, set it
       if (pendingClientFilter) {
-        console.log('[DEBUG] Found pending client filter:', pendingClientFilter);
+        logger.log('[DEBUG] Found pending client filter:', pendingClientFilter);
         setSelectedClientId(pendingClientFilter);
         localStorage.removeItem('pendingClientFilter');
       }
       
       // If there's a week filter, set it to show recent checks automatically
       if (pendingWeekFilter) {
-        console.log('[DEBUG] Found pending week filter:', pendingWeekFilter);
+        logger.log('[DEBUG] Found pending week filter:', pendingWeekFilter);
         setSelectedWeekKey(pendingWeekFilter);
         localStorage.removeItem('pendingWeekFilter');
       }
@@ -1197,7 +1233,7 @@ const [userLoaded, setUserLoaded] = useState(false);
 
   // Handler for Back to Companies
   const handleBackToCompanies = () => {
-    console.log('[ACTION] handleBackToCompanies');
+    logger.log('[ACTION] handleBackToCompanies');
     hasUserClearedCompany.current = true;
     setSelectedCompanyId(null);
     setSelectedWeekKey(null);
@@ -1206,7 +1242,7 @@ const [userLoaded, setUserLoaded] = useState(false);
 
   // Handler for Back to Weeks
   const handleBackToWeeks = () => {
-    console.log('[ACTION] handleBackToWeeks');
+    logger.log('[ACTION] handleBackToWeeks');
     hasUserClearedWeek.current = true;
     setSelectedWeekKey(null);
     setIsSelectingWeek(true);
@@ -1214,7 +1250,7 @@ const [userLoaded, setUserLoaded] = useState(false);
 
   // When a week is selected (user click or auto-select), exit week selection mode
   useEffect(() => {
-    console.log('[EFFECT] selectedWeekKey changed:', selectedWeekKey);
+    logger.log('[EFFECT] selectedWeekKey changed:', selectedWeekKey);
     if (selectedWeekKey) {
       setIsSelectingWeek(false);
     }
@@ -1222,7 +1258,7 @@ const [userLoaded, setUserLoaded] = useState(false);
 
   // Auto-select first available company when companies change, unless user cleared
   useEffect(() => {
-    console.log('[EFFECT] companies or selectedCompanyId changed:', companies, selectedCompanyId);
+    logger.log('[EFFECT] companies or selectedCompanyId changed:', companies, selectedCompanyId);
     if (!selectedCompanyId && companies.length > 0 && !hasUserClearedCompany.current) {
       setSelectedCompanyId(companies[0].id);
     }
@@ -1230,22 +1266,22 @@ const [userLoaded, setUserLoaded] = useState(false);
 
   // Reset week-cleared ref when company changes
   useEffect(() => {
-    console.log('[EFFECT] selectedCompanyId changed:', selectedCompanyId);
+    logger.log('[EFFECT] selectedCompanyId changed:', selectedCompanyId);
     hasUserClearedWeek.current = false;
   }, [selectedCompanyId]);
 
   // On initial mount, only reset state if no filter is provided
   useEffect(() => {
-    console.log('[EFFECT] initial mount, filter:', filter);
+    logger.log('[EFFECT] initial mount, filter:', filter);
     if (!filter || (!filter.companyId && !filter.weekKey)) {
-      console.log('[EFFECT] No filter provided, resetting state');
+      logger.log('[EFFECT] No filter provided, resetting state');
       setSelectedCompanyId(null);
       setSelectedWeekKey(null);
       setIsSelectingWeek(false);
       hasUserClearedCompany.current = false;
       hasUserClearedWeek.current = false;
     } else {
-      console.log('[EFFECT] Filter provided, not resetting state');
+      logger.log('[EFFECT] Filter provided, not resetting state');
     }
   }, [filter]);
 
@@ -1253,7 +1289,7 @@ const [userLoaded, setUserLoaded] = useState(false);
   const [userMap, setUserMap] = React.useState<UserMap>({});
   React.useEffect(() => {
     async function buildUserMap() {
-      console.log('[DEBUG] buildUserMap called, currentRole:', currentRole, 'checks.length:', checks.length);
+      logger.log('[DEBUG] buildUserMap called, currentRole:', currentRole, 'checks.length:', checks.length);
       
       if (currentRole === 'admin') {
         // Admin: use all users
@@ -1263,14 +1299,14 @@ const [userLoaded, setUserLoaded] = useState(false);
           map[key] = user.username || user.email || 'Unknown';
         });
         setUserMap(map);
-        console.log('[CHECKPOINT] userMap (admin) keys:', Object.keys(map), 'sample:', map[Object.keys(map)[0]]);
+        logger.log('[CHECKPOINT] userMap (admin) keys:', Object.keys(map), 'sample:', map[Object.keys(map)[0]]);
       } else {
         // User: fetch only needed user docs for createdBy UIDs
         const createdByUids = Array.from(new Set(checks.map((c: any) => c.createdBy).filter(Boolean)));
-        console.log('[DEBUG] createdByUids for user:', createdByUids);
+        logger.log('[DEBUG] createdByUids for user:', createdByUids);
         
         if (createdByUids.length === 0) {
-          console.log('[DEBUG] No createdBy UIDs found, setting empty userMap');
+          logger.log('[DEBUG] No createdBy UIDs found, setting empty userMap');
           setUserMap({});
           return;
         }
@@ -1279,7 +1315,7 @@ const [userLoaded, setUserLoaded] = useState(false);
           let userDocs: any[] = [];
           for (let i = 0; i < createdByUids.length; i += 10) {
             const chunk = createdByUids.slice(i, i + 10);
-            console.log('[DEBUG] Fetching user chunk:', chunk);
+            logger.log('[DEBUG] Fetching user chunk:', chunk);
             
             // Try different approaches to fetch user documents
             let snap;
@@ -1287,14 +1323,14 @@ const [userLoaded, setUserLoaded] = useState(false);
               // First try: query by uid field
               const q = query(collection(db, 'users'), where('uid', 'in', chunk));
               snap = await getDocs(q);
-              console.log('[DEBUG] User chunk result (uid query):', snap.docs.map(d => ({ id: d.id, data: d.data() })));
+              logger.log('[DEBUG] User chunk result (uid query):', snap.docs.map(d => ({ id: d.id, data: d.data() })));
             } catch (error) {
-              console.log('[DEBUG] uid query failed, trying direct document gets');
+              logger.log('[DEBUG] uid query failed, trying direct document gets');
               // Second try: get documents directly by ID
               const docPromises = chunk.map(uid => getDoc(doc(db, 'users', uid)));
               const docSnaps = await Promise.all(docPromises);
               snap = { docs: docSnaps.filter(snap => snap.exists()).map(snap => ({ id: snap.id, data: () => snap.data() })) };
-              console.log('[DEBUG] User chunk result (direct gets):', snap.docs.map(d => ({ id: d.id, data: d.data() })));
+              logger.log('[DEBUG] User chunk result (direct gets):', snap.docs.map(d => ({ id: d.id, data: d.data() })));
             }
             
             userDocs.push(...snap.docs);
@@ -1305,7 +1341,7 @@ const [userLoaded, setUserLoaded] = useState(false);
             const uid = data.uid || doc.id;
             const name = data.username || data.email || 'Unknown';
             map[uid] = name;
-            console.log('[DEBUG] Added to userMap:', uid, '->', name);
+            logger.log('[DEBUG] Added to userMap:', uid, '->', name);
           });
           
           // Add fallback entries for missing users
@@ -1315,11 +1351,11 @@ const [userLoaded, setUserLoaded] = useState(false);
             // Try to create a friendly name from the UID or use a default
             const shortUid = uid.substring(0, 8);
             map[uid] = `User-${shortUid}`;
-            console.log('[DEBUG] Added fallback to userMap:', uid, '-> User-' + shortUid);
+            logger.log('[DEBUG] Added fallback to userMap:', uid, '-> User-' + shortUid);
           });
           
           setUserMap(map);
-          console.log('[CHECKPOINT] userMap (user) keys:', Object.keys(map), 'sample:', map[Object.keys(map)[0]]);
+          logger.log('[CHECKPOINT] userMap (user) keys:', Object.keys(map), 'sample:', map[Object.keys(map)[0]]);
         } catch (error) {
           console.error('[DEBUG] Error building userMap:', error);
           setUserMap({});
@@ -1342,7 +1378,7 @@ const [userLoaded, setUserLoaded] = useState(false);
           division: d.data().division || '',
         }));
         setClients(clientList);
-        console.log('[OptimizedViewChecks] fetched clients:', clientList);
+        logger.log('[OptimizedViewChecks] fetched clients:', clientList);
       } catch (error) {
         console.error('[OptimizedViewChecks] Error fetching clients:', error);
         setClients([]);
@@ -1375,23 +1411,23 @@ const [userLoaded, setUserLoaded] = useState(false);
         }
         return false;
       });
-      console.log('🔒 [ViewChecks Security] Filtered checks by visibleClientIds:', {
+      logger.log('🔒 [ViewChecks Security] Filtered checks by visibleClientIds:', {
         originalCount: checks.length,
         afterCompanyFilter: allowedChecks.length,
         visibleClientIds
       });
     }
     
-    console.log('[DEBUG] Filtering - currentRole:', currentRole);
-    console.log('[DEBUG] Filtering - companyIds:', companyIds);
-    console.log('[DEBUG] Filtering - allowedChecks.length:', allowedChecks.length);
-    console.log('[DEBUG] Filtering - selectedCompanyId:', selectedCompanyId);
-    console.log('[DEBUG] Filtering - checksLoading:', checksLoading);
+    logger.log('[DEBUG] Filtering - currentRole:', currentRole);
+    logger.log('[DEBUG] Filtering - companyIds:', companyIds);
+    logger.log('[DEBUG] Filtering - allowedChecks.length:', allowedChecks.length);
+    logger.log('[DEBUG] Filtering - selectedCompanyId:', selectedCompanyId);
+    logger.log('[DEBUG] Filtering - checksLoading:', checksLoading);
     
     if (!selectedCompanyId || checksLoading) return [];
     let filtered = allowedChecks.filter(c => c.companyId === selectedCompanyId);
-    console.log('[DEBUG] Filtering - filtered after companyId filter:', filtered.length);
-    console.log('[DEBUG] Filtering - sample check companyId:', allowedChecks[0]?.companyId);
+    logger.log('[DEBUG] Filtering - filtered after companyId filter:', filtered.length);
+    logger.log('[DEBUG] Filtering - sample check companyId:', allowedChecks[0]?.companyId);
     // Apply week filter
     if (selectedWeekKey) {
       filtered = filtered.filter((c: any) => {
@@ -1427,8 +1463,18 @@ const [userLoaded, setUserLoaded] = useState(false);
     if (reviewOnly) {
       filtered = filtered.filter((c: any) => c.reviewed === false);
     }
+    // Apply expense filter
+    if (showExpenseChecks !== null) {
+      if (showExpenseChecks === true) {
+        // Show only expense checks
+        filtered = filtered.filter((c: any) => c.isExpense === true);
+      } else {
+        // Exclude expense checks
+        filtered = filtered.filter((c: any) => !c.isExpense);
+      }
+    }
     return filtered.sort((a, b) => (b.checkNumber || 0) - (a.checkNumber || 0));
-  }, [selectedCompanyId, checks, selectedWeekKey, selectedCreatedBy, selectedClientId, debouncedSearchText, userMap, checksLoading, reviewOnly, companyIds, currentRole, visibleClientIds]);
+  }, [selectedCompanyId, checks, selectedWeekKey, selectedCreatedBy, selectedClientId, debouncedSearchText, userMap, checksLoading, reviewOnly, companyIds, currentRole, visibleClientIds, showExpenseChecks]);
 
   // Memoized checks by week
   const checksByWeek = useMemo(() => {
@@ -1449,11 +1495,11 @@ const [userLoaded, setUserLoaded] = useState(false);
   }, [selectedCompanyId, checksByWeek]);
   useEffect(() => {
     if (!checksLoading) {
-      console.log('[OptimizedViewChecks] (debug) fetched checks:', checks);
-      console.log('[OptimizedViewChecks] (debug) selectedCompanyId:', selectedCompanyId);
-      console.log('[OptimizedViewChecks] (debug) filteredChecks:', filteredChecks);
-      console.log('[OptimizedViewChecks] (debug) checksByWeek:', checksByWeek);
-      console.log('[OptimizedViewChecks] (debug) weekKeys:', weekKeys);
+      logger.log('[OptimizedViewChecks] (debug) fetched checks:', checks);
+      logger.log('[OptimizedViewChecks] (debug) selectedCompanyId:', selectedCompanyId);
+      logger.log('[OptimizedViewChecks] (debug) filteredChecks:', filteredChecks);
+      logger.log('[OptimizedViewChecks] (debug) checksByWeek:', checksByWeek);
+      logger.log('[OptimizedViewChecks] (debug) weekKeys:', weekKeys);
     }
   }, [checks, checksLoading, selectedCompanyId, filteredChecks, checksByWeek, weekKeys]);
 
@@ -1463,7 +1509,7 @@ const [userLoaded, setUserLoaded] = useState(false);
       const testCheckId = 'pszgkumWWhSdHxyGFv42'; // Use the ID from your screenshot
       import('firebase/firestore').then(({ getDoc, doc }) => {
         getDoc(doc(db, 'checks', testCheckId)).then(snap => {
-          console.log('[DEBUG] Manual getDoc for check:', snap.exists() ? snap.data() : 'not found');
+          logger.log('[DEBUG] Manual getDoc for check:', snap.exists() ? snap.data() : 'not found');
         }).catch(err => {
           console.error('[DEBUG] Manual getDoc error:', err);
         });
@@ -1502,7 +1548,7 @@ const [userLoaded, setUserLoaded] = useState(false);
               updateDoc(doc(db, 'checks', check.id), { paid: true })
             )
           );
-          console.log(`✅ Marked ${checksToMarkAsPaid.length} checks as paid`);
+          logger.log(`Marked ${checksToMarkAsPaid.length} checks as paid`);
           if (refetchChecks) refetchChecks();
         } catch (err) {
           console.error('Error marking checks as paid:', err);
@@ -1510,6 +1556,98 @@ const [userLoaded, setUserLoaded] = useState(false);
       }
     } catch (err) {
       alert('Error printing checks.');
+    }
+  };
+
+  const handleExportReviewedChecksExcel = async (companyId: string | null, weekKey: string | null) => {
+    if (!companyId || !weekKey) return;
+    
+    // Filter reviewed checks for the selected week
+    const reviewedChecks = (checksByWeek[weekKey] || []).filter((c: any) => c.reviewed === true);
+    if (reviewedChecks.length === 0) {
+      alert('No reviewed checks to export for this week.');
+      return;
+    }
+    
+    const checkIds = reviewedChecks.map((c: any) => c.id);
+    
+    try {
+      // Get the selected company data
+      const selectedCompany = companies.find(c => c.id === companyId);
+      
+      // Get the selected banks data - find banks for the selected company
+      const selectedBanks = banks.filter(bank => bank.companyId === companyId);
+      
+      // Always use the company's own banks, even if they don't have signatures
+      if (selectedBanks.length === 0) {
+        const banksWithSignature = banks.filter(bank => bank.digitalSignature);
+        if (banksWithSignature.length > 0) {
+          selectedBanks.length = 0;
+          selectedBanks.push(banksWithSignature[0]);
+        }
+      }
+      
+      // Get current user's username
+      const currentUser = auth.currentUser;
+      let createdByUsername = 'Unknown User';
+
+      if (currentUser) {
+        try {
+          const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
+          if (userDoc.exists()) {
+            const userData = userDoc.data();
+            createdByUsername = userData.username || userData.email || 'Unknown User';
+          }
+        } catch (error) {
+          console.error('Error fetching user data:', error);
+          createdByUsername = 'Unknown User';
+        }
+      }
+      
+      // Before sending the request, decrypt the bank data
+      const decryptedBankData = selectedBanks.map(bank => ({
+        ...bank,
+        routingNumber: decryptData(bank.routingNumber),
+        accountNumber: decryptData(bank.accountNumber)
+      }));
+      
+      // Send the complete data to backend
+      const requestBody = {
+        checkIds: checkIds,
+        weekKey: weekKey,
+        checksData: reviewedChecks,
+        companyData: selectedCompany,
+        bankData: decryptedBankData,
+        createdByUsername: createdByUsername
+      };
+      
+      const exportUrl = getApiUrl('/api/export_selected_checks_excel');
+      
+      const response = await fetch(exportUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('🔍 Error response:', errorText);
+        alert(`Error exporting Excel: ${response.status} - ${errorText}`);
+        return;
+      }
+      
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `reviewed_checks_${weekKey}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Error exporting Excel:', err);
+      alert('Error exporting Excel.');
     }
   };
 
@@ -1528,26 +1666,26 @@ const [userLoaded, setUserLoaded] = useState(false);
     try {
       // Get the selected company data
       const selectedCompany = companies.find(c => c.id === companyId);
-      console.log('🔍 Selected company data:', selectedCompany);
+      logger.log('[DEBUG] Selected company data:', selectedCompany);
       
       // Get the selected banks data - find banks for the selected company
       const selectedBanks = banks.filter(bank => bank.companyId === companyId);
       
       // Always use the company's own banks, even if they don't have signatures
       if (selectedBanks.length === 0) {
-        console.log('🔍 No banks found for this company, using fallback');
+        logger.log('[DEBUG] No banks found for this company, using fallback');
         // Only use fallback if no banks exist for this company at all
         const banksWithSignature = banks.filter(bank => bank.digitalSignature);
         if (banksWithSignature.length > 0) {
-          console.log('🔍 Using fallback bank with signature:', banksWithSignature[0].bankName);
+          logger.log('[DEBUG] Using fallback bank with signature:', banksWithSignature[0].bankName);
           selectedBanks.length = 0; // Clear the array
           selectedBanks.push(banksWithSignature[0]); // Add the bank with signature
         }
       } else {
-        console.log('🔍 Using company banks:', selectedBanks.map(b => b.bankName).join(', '));
+        logger.log('🔍 Using company banks:', selectedBanks.map(b => b.bankName).join(', '));
       }
       
-      console.log('🔍 Selected banks data:', selectedBanks);
+      logger.log('[DEBUG] Selected banks data:', selectedBanks);
       
       // Get current user's username
       const currentUser = auth.currentUser;
@@ -1585,8 +1723,8 @@ const [userLoaded, setUserLoaded] = useState(false);
       };
       
       const printSelectedUrl = getApiUrl('/api/print_selected_checks');
-      console.log('🔍 Sending request to:', printSelectedUrl);
-      console.log('🔍 Request body:', requestBody);
+      logger.log('[DEBUG] Sending request to:', printSelectedUrl);
+      logger.log('[DEBUG] Request body:', requestBody);
       
       const response = await fetch(printSelectedUrl, {
         method: 'POST',
@@ -1620,7 +1758,7 @@ const [userLoaded, setUserLoaded] = useState(false);
               updateDoc(doc(db, 'checks', check.id), { paid: true })
             )
           );
-          console.log(`✅ Marked ${checksToMarkAsPaid.length} reviewed checks as paid`);
+          logger.log(`✅ Marked ${checksToMarkAsPaid.length} reviewed checks as paid`);
           if (refetchChecks) refetchChecks();
         } catch (err) {
           console.error('Error marking reviewed checks as paid:', err);
@@ -1634,7 +1772,7 @@ const [userLoaded, setUserLoaded] = useState(false);
 
   // Optimized handlers
   const handleCompanySelect = useCallback((companyId: string) => {
-    console.log('[ACTION] handleCompanySelect', companyId);
+    logger.log('[ACTION] handleCompanySelect', companyId);
     setSelectedCompanyId(companyId);
     setSelectedWeekKey(null);
     setSelectedCreatedBy(null);
@@ -1642,13 +1780,40 @@ const [userLoaded, setUserLoaded] = useState(false);
 
   const handleOpenDialog = useCallback((check: CheckItem) => {
     setSelectedCheck(check);
+    setOpenedFromPendingChecks(false); // Reset flag when opening normally
     setOpenDialog(true);
+    // Log expense check status for debugging
+    const checkWithExpense = check as any;
+    if (checkWithExpense.isExpense) {
+      logger.log('💰 EXPENSE CHECK DETECTED:', {
+        checkId: check.id,
+        checkNumber: check.checkNumber,
+        employeeName: check.employeeName,
+        amount: check.amount,
+        isExpense: checkWithExpense.isExpense,
+        expenseName: checkWithExpense.expenseName,
+        expenseDescription: checkWithExpense.expenseDescription
+      });
+    } else {
+      logger.log('📋 Regular Check:', {
+        checkId: check.id,
+        checkNumber: check.checkNumber,
+        employeeName: check.employeeName,
+        amount: check.amount,
+        isExpense: false
+      });
+    }
   }, []);
 
   const handleCloseDialog = useCallback(() => {
     setOpenDialog(false);
     setSelectedCheck(null);
-  }, []);
+    // If opened from pending checks dialog, reopen it
+    if (openedFromPendingChecks) {
+      setOpenPendingChecksDialog(true);
+      setOpenedFromPendingChecks(false);
+    }
+  }, [openedFromPendingChecks]);
 
   // Checkbox selection functions
   const handleCheckboxChange = (checkId: string) => {
@@ -1674,6 +1839,103 @@ const [userLoaded, setUserLoaded] = useState(false);
     setSelectedChecks(new Set());
   };
 
+  // Toggle select all - if all selected, deselect all; otherwise select all
+  const handleToggleSelectAll = () => {
+    if (selectedWeekKey && checksByWeek[selectedWeekKey]) {
+      const allCheckIds = checksByWeek[selectedWeekKey].map(check => check.id);
+      const allSelected = allCheckIds.length > 0 && allCheckIds.every(id => selectedChecks.has(id));
+      
+      if (allSelected) {
+        setSelectedChecks(new Set());
+      } else {
+        setSelectedChecks(new Set(allCheckIds));
+      }
+    }
+  };
+
+  const handleExportSelectedChecksExcel = async () => {
+    if (selectedChecks.size === 0) {
+      alert('Please select at least one check to export.');
+      return;
+    }
+    
+    if (selectedCompanyId && selectedWeekKey) {
+      const selectedChecksList = Array.from(selectedChecks);
+      logger.log('Exporting selected checks to Excel:', selectedChecksList);
+      
+      // Get the actual check data from the filtered checks
+      const selectedChecksData = filteredChecks.filter(check => selectedChecksList.includes(check.id));
+      
+      // Get the selected company data
+      const selectedCompany = companies.find(c => c.id === selectedCompanyId);
+      
+      // Get the selected banks data - find banks for the selected company
+      const selectedBanks = banks.filter(bank => bank.companyId === selectedCompanyId);
+      
+      // Before sending the request, decrypt the bank data
+      const decryptedBankData = selectedBanks.map(bank => ({
+        ...bank,
+        routingNumber: decryptData(bank.routingNumber),
+        accountNumber: decryptData(bank.accountNumber)
+      }));
+      
+      // Get current user's username
+      const currentUser = auth.currentUser;
+      let createdByUsername = 'Unknown User';
+
+      if (currentUser) {
+        try {
+          const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
+          if (userDoc.exists()) {
+            const userData = userDoc.data();
+            createdByUsername = userData.username || userData.email || 'Unknown User';
+          }
+        } catch (error) {
+          console.error('Error fetching user data:', error);
+          createdByUsername = 'Unknown User';
+        }
+      }
+      
+      const requestBody = {
+        checkIds: selectedChecksList,
+        weekKey: selectedWeekKey,
+        checksData: selectedChecksData,
+        companyData: selectedCompany,
+        bankData: decryptedBankData,
+        createdByUsername: createdByUsername
+      };
+      
+      try {
+        const exportUrl = getApiUrl('/api/export_selected_checks_excel');
+        const response = await fetch(exportUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody)
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error('🔍 Error response:', errorText);
+          alert(`Error exporting Excel: ${response.status} - ${errorText}`);
+          return;
+        }
+        
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `selected_checks_${selectedWeekKey}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+      } catch (err) {
+        console.error('Error exporting Excel:', err);
+        alert('Error exporting Excel.');
+      }
+    }
+  };
+
   const handlePrintSelectedChecks = async () => {
     if (selectedChecks.size === 0) {
       alert('Please select at least one check to print.');
@@ -1682,19 +1944,20 @@ const [userLoaded, setUserLoaded] = useState(false);
     
     if (selectedCompanyId && selectedWeekKey) {
       const selectedChecksList = Array.from(selectedChecks);
-      console.log('Printing selected checks:', selectedChecksList);
+      logger.log('Printing selected checks:', selectedChecksList);
       
       // Get the actual check data from the filtered checks
       const selectedChecksData = filteredChecks.filter(check => selectedChecksList.includes(check.id));
-      console.log('🔍 Selected checks data:', selectedChecksData);
+      logger.log('[DEBUG] Selected checks data:', selectedChecksData);
+      logger.log('[DEBUG] WorkWeek values:', selectedChecksData.map(c => ({ name: c.employeeName, workWeek: c.workWeek })));
       
       // Get the selected company data
       const selectedCompany = companies.find(c => c.id === selectedCompanyId);
-      console.log(' Selected company data:', selectedCompany);
-      console.log(' Company logo data:', selectedCompany?.logoBase64 ? 'Present' : 'Missing');
+      logger.log(' Selected company data:', selectedCompany);
+      logger.log(' Company logo data:', selectedCompany?.logoBase64 ? 'Present' : 'Missing');
       if (selectedCompany?.logoBase64) {
-        console.log('🔍 Logo data length:', selectedCompany.logoBase64.length);
-        console.log('🔍 Logo data starts with:', selectedCompany.logoBase64.substring(0, 50));
+        logger.log('[DEBUG] Logo data length:', selectedCompany.logoBase64.length);
+        logger.log('[DEBUG] Logo data starts with:', selectedCompany.logoBase64.substring(0, 50));
       }
       
       // Get the selected banks data - find banks for the selected company
@@ -1702,23 +1965,23 @@ const [userLoaded, setUserLoaded] = useState(false);
       
       // Always use the company's own banks, even if they don't have signatures
       if (selectedBanks.length === 0) {
-        console.log('🔍 No banks found for this company');
+        logger.log('[DEBUG] No banks found for this company');
         // Don't use fallback - let the backend handle missing banks
       } else {
-        console.log('🔍 Using company banks:', selectedBanks.map(b => b.bankName).join(', '));
+        logger.log('🔍 Using company banks:', selectedBanks.map(b => b.bankName).join(', '));
       }
       
-      console.log(' Selected banks data:', selectedBanks);
-      console.log('🔍 Bank signature data:', selectedBanks[0]?.digitalSignature ? 'Present' : 'Missing');
+      logger.log(' Selected banks data:', selectedBanks);
+      logger.log('[DEBUG] Bank signature data:', selectedBanks[0]?.digitalSignature ? 'Present' : 'Missing');
       if (selectedBanks[0]?.digitalSignature) {
-        console.log('🔍 Signature data length:', selectedBanks[0].digitalSignature.length);
-        console.log('🔍 Signature data starts with:', selectedBanks[0].digitalSignature.substring(0, 50));
+        logger.log('[DEBUG] Signature data length:', selectedBanks[0].digitalSignature.length);
+        logger.log('[DEBUG] Signature data starts with:', selectedBanks[0].digitalSignature.substring(0, 50));
       }
       
       try {
         const printSelectedUrl = getApiUrl('/api/print_selected_checks');
-        console.log('🔍 Sending request to:', printSelectedUrl);
-        console.log('🔍 Request body:', { 
+        logger.log('[DEBUG] Sending request to:', printSelectedUrl);
+        logger.log('🔍 Request body:', { 
           checkIds: selectedChecksList, 
           weekKey: selectedWeekKey,
           checksData: selectedChecksData,  // Send the actual check data
@@ -1765,7 +2028,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
         
-        console.log('🔍 About to send fetch request...');
+        logger.log('[DEBUG] About to send fetch request...');
         const response = await fetch(printSelectedUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1773,11 +2036,11 @@ const [userLoaded, setUserLoaded] = useState(false);
           signal: controller.signal
         });
         
-        console.log('🔍 Fetch request completed, got response');
+        logger.log('[DEBUG] Fetch request completed, got response');
         clearTimeout(timeoutId);
         
-        console.log('�� Response status:', response.status);
-        console.log('🔍 Response headers:', response.headers);
+        logger.log('�� Response status:', response.status);
+        logger.log('[DEBUG] Response headers:', response.headers);
         
         if (!response.ok) {
           const errorText = await response.text();
@@ -1787,7 +2050,7 @@ const [userLoaded, setUserLoaded] = useState(false);
         }
         
         const blob = await response.blob();
-        console.log('🔍 Blob size:', blob.size);
+        logger.log('[DEBUG] Blob size:', blob.size);
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1809,7 +2072,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                 updateDoc(doc(db, 'checks', check.id), { paid: true })
               )
             );
-            console.log(`✅ Marked ${checksToMarkAsPaid.length} selected checks as paid`);
+            logger.log(`✅ Marked ${checksToMarkAsPaid.length} selected checks as paid`);
             if (refetchChecks) refetchChecks();
           } catch (err) {
             console.error('Error marking selected checks as paid:', err);
@@ -1868,17 +2131,17 @@ const [userLoaded, setUserLoaded] = useState(false);
 
   // Add logs for user role
   useEffect(() => {
-    console.log('[OptimizedViewChecks] currentRole:', currentRole);
+    logger.log('[OptimizedViewChecks] currentRole:', currentRole);
   }, [currentRole]);
 
   // Global debug log at every render
-  console.log('[RENDER] selectedCompanyId:', selectedCompanyId, 'selectedWeekKey:', selectedWeekKey, 'isSelectingWeek:', isSelectingWeek, 'weekKeys:', weekKeys);
+  logger.log('[RENDER] selectedCompanyId:', selectedCompanyId, 'selectedWeekKey:', selectedWeekKey, 'isSelectingWeek:', isSelectingWeek, 'weekKeys:', weekKeys);
 
 
 
   // Handler for selecting a company
   const handleSelectCompany = (companyId: string) => {
-    console.log('[ACTION] handleSelectCompany', companyId);
+    logger.log('[ACTION] handleSelectCompany', companyId);
     setSelectedCompanyId(companyId);
     setIsSelectingWeek(true);
     setSelectedWeekKey(null);
@@ -1898,7 +2161,7 @@ const [userLoaded, setUserLoaded] = useState(false);
 
   // Show week selection UI if a company is selected but week is not, or if isSelectingWeek is true
   if (selectedCompanyId && (isSelectingWeek || !selectedWeekKey)) {
-    console.log('[RENDER] Rendering week selection UI', weekKeys, 'isSelectingWeek:', isSelectingWeek, 'selectedWeekKey:', selectedWeekKey);
+    logger.log('[RENDER] Rendering week selection UI', weekKeys, 'isSelectingWeek:', isSelectingWeek, 'selectedWeekKey:', selectedWeekKey);
     return (
       <Box sx={{ p: 3 }}>
         <Button variant="outlined" sx={{ mb: 3 }} onClick={handleBackToCompanies}>
@@ -2016,11 +2279,11 @@ const [userLoaded, setUserLoaded] = useState(false);
                   })
                   .sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
 
-                console.log('[DEBUG] Default view - showing weeks around current week with checks:', filteredWeeks);
+                logger.log('[DEBUG] Default view - showing weeks around current week with checks:', filteredWeeks);
               } else if (selectedWeekFilter === 'all') {
                 const currentYear = new Date().getFullYear().toString();
                 filteredWeeks = weekKeys.filter(weekKey =>
-                  new Date(weekKey).getFullYear().toString() === currentYear
+                  parseDateKey(weekKey).getFullYear().toString() === currentYear
                 );
               } else if (selectedWeekFilter === 'year') {
                 const allWeeksInYear: string[] = [];
@@ -2034,10 +2297,17 @@ const [userLoaded, setUserLoaded] = useState(false);
                   currentDate.setDate(currentDate.getDate() + 7);
                 }
 
-                filteredWeeks = allWeeksInYear;
+                // Filter to only show weeks that have checks
+                filteredWeeks = allWeeksInYear.filter(weekKey => {
+                  const weekChecks = checksByWeek[weekKey] || [];
+                  const companyChecks = selectedCompanyId
+                    ? weekChecks.filter((c: any) => c.companyId === selectedCompanyId)
+                    : weekChecks;
+                  return companyChecks.length > 0;
+                });
               }
 
-              console.log('[DEBUG] Final filteredWeeks:', filteredWeeks);
+              logger.log('[DEBUG] Final filteredWeeks:', filteredWeeks);
 
               if (filteredWeeks.length === 0) {
                 return (
@@ -2051,10 +2321,19 @@ const [userLoaded, setUserLoaded] = useState(false);
               }
 
               return filteredWeeks.map((weekKey, index) => {
-                console.log('[DEBUG] Rendering week:', weekKey, 'index:', index);
-                const weekDate = new Date(weekKey);
-                const weekEndDate = new Date(weekDate);
-                weekEndDate.setDate(weekDate.getDate() + 6);
+                logger.log('[DEBUG] Rendering week:', weekKey, 'index:', index);
+                // weekKey is Monday (start of calendar week), but Work Week is Sunday-Saturday (previous week)
+                // So we go back 8 days from Monday to get the previous Sunday, then add 6 days to get Saturday
+                const weekDate = parseDateKey(weekKey);
+                const workWeekStart = new Date(weekDate);
+                workWeekStart.setDate(weekDate.getDate() - 8); // Go back 8 days to get previous Sunday
+                const workWeekEnd = new Date(workWeekStart);
+                workWeekEnd.setDate(workWeekStart.getDate() + 6); // Add 6 days to get Saturday
+
+                // Calculate work week: Work Week = Calendar Week - 1 = ISO Week - 2
+                // Dec 1 (Monday) is ISO Week 50 = Calendar Week 49, Work Week = 49 - 1 = 48
+                // Dec 8 (Monday) is ISO Week 51 = Calendar Week 50, Work Week = 50 - 1 = 49
+                const workWeekNumber = getWeekNumber(weekDate) - 2;
 
                 // For "All Weeks" view, only show checks for the selected company
                 const weekChecks = checksByWeek[weekKey] || [];
@@ -2089,15 +2368,15 @@ const [userLoaded, setUserLoaded] = useState(false);
                       position: 'relative'
                     }}
                     onClick={() => {
-                      console.log('[ACTION] Week button clicked', weekKey);
+                      logger.log('[ACTION] Week button clicked', weekKey);
                       setSelectedWeekKey(weekKey);
                       setIsSelectingWeek(false);
                     }}
                   >
                     {/* Week Date Range */}
                     <Typography variant="h6" sx={{ fontWeight: 'bold', mb: 1 }}>
-                      Week {getWeekNumber(weekDate)} - Week of{' '}
-                      {weekDate.toLocaleDateString('en-US', {
+                      Work Week {workWeekNumber} - Week of{' '}
+                      {workWeekStart.toLocaleDateString('en-US', {
                         month: 'short',
                         day: 'numeric',
                         year: 'numeric'
@@ -2106,10 +2385,10 @@ const [userLoaded, setUserLoaded] = useState(false);
                   
                   {/* Date Range */}
                   <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                    {weekDate.toLocaleDateString('en-US', { 
+                    {workWeekStart.toLocaleDateString('en-US', { 
                       month: 'short', 
                       day: 'numeric'
-                    })} - {weekEndDate.toLocaleDateString('en-US', { 
+                    })} - {workWeekEnd.toLocaleDateString('en-US', { 
                       month: 'short', 
                       day: 'numeric'
                     })}
@@ -2409,7 +2688,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                 borderColor: 'grey.200'
               }}>
                 <Typography variant="h5" sx={{ mb: 2, fontWeight: 'bold', color: 'primary.main' }}>
-                  📅 Select a Work Week
+                  Select a Work Week
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
                   {weekKeys.length} week{weekKeys.length !== 1 ? 's' : ''} available for {companies.find(c => c.id === selectedCompanyId)?.name}
@@ -2422,7 +2701,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                     size="small"
                     sx={{ width: 300, mr: 2 }}
                     InputProps={{
-                      startAdornment: <span style={{ marginRight: '8px' }}>🔍</span>
+                      startAdornment: <SearchIcon sx={{ fontSize: 18, color: 'text.secondary', mr: 1 }} />
                     }}
                   />
                   <FormControl size="small" sx={{ minWidth: 150 }}>
@@ -2448,9 +2727,13 @@ const [userLoaded, setUserLoaded] = useState(false);
                   p: 1
                 }}>
                   {weekKeys.map((weekKey, index) => {
-                    const weekDate = new Date(weekKey);
-                    const weekEndDate = new Date(weekDate);
-                    weekEndDate.setDate(weekDate.getDate() + 6);
+                    // weekKey is Monday (start of calendar week), but Work Week is Sunday-Saturday (previous week)
+                    // So we go back 8 days from Monday to get the previous Sunday, then add 6 days to get Saturday
+                    const weekDate = parseDateKey(weekKey);
+                    const workWeekStart = new Date(weekDate);
+                    workWeekStart.setDate(weekDate.getDate() - 8); // Go back 8 days to get previous Sunday
+                    const workWeekEnd = new Date(workWeekStart);
+                    workWeekEnd.setDate(workWeekStart.getDate() + 6); // Add 6 days to get Saturday
                     
                     const checkCount = checksByWeek[weekKey]?.length || 0;
                     const pendingReview = checksByWeek[weekKey]?.filter((c: any) => !c.reviewed).length || 0;
@@ -2482,7 +2765,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                       >
                         {/* Week Date Range */}
                         <Typography variant="h6" sx={{ fontWeight: 'bold', mb: 1 }}>
-                          Week {getWeekNumber(weekDate)} - Week of {weekDate.toLocaleDateString('en-US', { 
+                          Work Week {getWeekNumber(weekDate) - 2} - Week of {workWeekStart.toLocaleDateString('en-US', { 
                             month: 'short', 
                             day: 'numeric',
                             year: 'numeric'
@@ -2491,10 +2774,10 @@ const [userLoaded, setUserLoaded] = useState(false);
                         
                         {/* Date Range */}
                         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                          {weekDate.toLocaleDateString('en-US', { 
+                          {workWeekStart.toLocaleDateString('en-US', { 
                             month: 'short', 
                             day: 'numeric'
-                          })} - {weekEndDate.toLocaleDateString('en-US', { 
+                          })} - {workWeekEnd.toLocaleDateString('en-US', { 
                             month: 'short', 
                             day: 'numeric'
                           })}
@@ -2584,9 +2867,33 @@ const [userLoaded, setUserLoaded] = useState(false);
               >
                 ← Back to Weeks
               </Button>
-              <Typography variant="h6" gutterBottom>
-                Checks for {companies.find(c => c.id === selectedCompanyId)?.name} - Week starting: {selectedWeekKey}
-              </Typography>
+              {selectedWeekKey && (() => {
+                // Calculate Pay Week and Work Week from the selectedWeekKey
+                const weekDate = parseDateKey(selectedWeekKey);
+                const workWeekStart = new Date(weekDate);
+                workWeekStart.setDate(weekDate.getDate() - 8); // Go back 8 days to get previous Sunday
+                const workWeekEnd = new Date(workWeekStart);
+                workWeekEnd.setDate(workWeekStart.getDate() + 6); // Add 6 days to get Saturday
+                
+                // Work Week = Calendar Week - 1 = ISO Week - 2
+                const workWeekNumber = getWeekNumber(weekDate) - 2;
+                // Pay Week = Work Week + 1
+                const payWeekNumber = workWeekNumber + 1;
+                
+                const workWeekRange = `${workWeekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${workWeekEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+                const calendarWeekRange = `${weekDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${new Date(weekDate.getTime() + 6 * 24 * 60 * 60 * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+                
+                return (
+                  <Box sx={{ mb: 2 }}>
+                    <Typography variant="h6" gutterBottom>
+                      Checks for {companies.find(c => c.id === selectedCompanyId)?.name}
+                    </Typography>
+                    <Typography variant="body1" color="text.secondary" sx={{ mb: 1 }}>
+                      <strong>Work Week {workWeekNumber}</strong>: {workWeekRange} | <strong>Pay Week {payWeekNumber}</strong>: {calendarWeekRange}
+                    </Typography>
+                  </Box>
+                );
+              })()}
               
               {/* Review Mode Toggle - Admin Only */}
               {currentRole === 'admin' && (
@@ -2607,120 +2914,209 @@ const [userLoaded, setUserLoaded] = useState(false);
                   )}
                 </Box>
               )}
-
-
-
-              {/* Selection Controls and Print Buttons */}
-              {selectedCompanyId && selectedWeekKey && (
-                <Box sx={{ mb: 2, display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
-                  {/* Selection Controls */}
-                  <Box sx={{ display: 'flex', gap: 1, mr: 2 }}>
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      onClick={handleSelectAllChecks}
-                    >
-                       Select All
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      onClick={handleDeselectAllChecks}
-                    >
-                       Deselect All
-                    </Button>
-                    <Chip 
-                      label={`${selectedChecks.size} selected`} 
-                      color="primary" 
-                      variant="outlined"
-                      size="small"
+              
+              {/* Expense Filter Toggle */}
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
+                <FormControl component="fieldset" size="small">
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <FormControlLabel
+                      control={
+                        <Checkbox
+                          checked={showExpenseChecks === false}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setShowExpenseChecks(false); // Exclude expenses
+                            } else {
+                              setShowExpenseChecks(null); // Show all
+                            }
+                          }}
+                          size="small"
+                        />
+                      }
+                      label="Hide Expense Checks"
+                    />
+                    <FormControlLabel
+                      control={
+                        <Checkbox
+                          checked={showExpenseChecks === true}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setShowExpenseChecks(true); // Show only expenses
+                            } else {
+                              setShowExpenseChecks(null); // Show all
+                            }
+                          }}
+                          size="small"
+                        />
+                      }
+                      label="Show Only Expense Checks"
                     />
                   </Box>
-
-                  {/* Send for Review Buttons - Only show for regular users */}
-                  {currentRole !== 'admin' && (
-                    <>
-                      <Button
-                        variant="contained"
-                        color="warning"
-                        onClick={handleBulkSendSelectedForReview}
-                        disabled={selectedChecks.size === 0 || Array.from(selectedChecks).some(checkId => checksSentForReview.has(checkId))}
-                        sx={{ ml: 1 }}
-                      >
-                        Send Selected for Review ({selectedChecks.size})
-                      </Button>
-                      <Button
-                        variant="contained"
-                        color="error"
-                        onClick={handleSendAllUnreviewedForReview}
-                        disabled={filteredChecks.filter((check: CheckItem) => !check.reviewed && !checksSentForReview.has(check.id)).length === 0}
-                        sx={{ ml: 1 }}
-                      >
-                        Send All Unreviewed for Review ({filteredChecks.filter((check: CheckItem) => !check.reviewed).length})
-                      </Button>
-                      <Button
-                        variant="outlined"
-                        color="error"
-                        onClick={handleBulkDeleteSelected}
-                        disabled={selectedChecks.size === 0 || !Array.from(selectedChecks).some(checkId => {
-                          const check = filteredChecks.find(c => c.id === checkId);
-                          return check && !check.reviewed;
-                        })}
-                        sx={{ ml: 1 }}
-                      >
-                        Delete Selected ({selectedChecks.size})
-                      </Button>
-                    </>
-                  )}
-
-                  {/* Print Buttons - Only show if user has permission */}
-                  {canPrintChecks && (
-                    <>
-                      <Button
-                        variant="contained"
-                        color="secondary"
-                        onClick={() => handlePrintReviewedChecks(selectedCompanyId, selectedWeekKey)}
-                        disabled={!selectedCompanyId || !selectedWeekKey}
-                      >
-                         Print Reviewed Checks
-                      </Button>
-                <Button
-                  variant="contained"
-                  color="success"
-                        onClick={handlePrintSelectedChecks}
-                        disabled={selectedChecks.size === 0}
-                >
-                        Print Selected ({selectedChecks.size})
-                </Button>
-                    </>
-              )}
-
-                  {/* Bulk Review Buttons - Admin Only */}
-                  {currentRole === 'admin' && selectedCompanyId && selectedWeekKey && (
-                <>
-                      {/* Review Selected Checks Button */}
+                </FormControl>
+                {showExpenseChecks !== null && (
                   <Button
-                    variant="contained"
-                    color="primary"
-                        onClick={() => handleReviewSelectedChecks()}
-                        disabled={selectedChecks.size === 0}
-                        sx={{ ml: 1 }}
-                      >
-                         Review Selected ({selectedChecks.size})
-                      </Button>
-                      
-                      {/* For admin users: Direct review all */}
-                  <Button
-                    variant="contained"
-                          color="info"
-                          onClick={() => handleDirectReviewAll()}
-                    disabled={!selectedCompanyId || !selectedWeekKey}
-                          sx={{ ml: 1 }}
+                    variant="outlined"
+                    size="small"
+                    onClick={() => setShowExpenseChecks(null)}
                   >
-                           Mark All as Reviewed (Admin)
+                    Show All
                   </Button>
-                </>
-                  )}
+                )}
+              </Box>
+
+
+
+              {/* Selection Controls and Floating Action Menu */}
+              {selectedCompanyId && selectedWeekKey && (
+                <Box sx={{ mb: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2 }}>
+                  {/* Selection Chip */}
+                  <Chip 
+                    label={`${selectedChecks.size} selected`} 
+                    color="primary" 
+                    variant="outlined"
+                    size="small"
+                  />
+                  
+                  {/* Floating Action Button - Right Side */}
+                  <Fab
+                    color="primary"
+                    size="medium"
+                    onClick={(e) => setActionMenuAnchor(e.currentTarget)}
+                    sx={{ position: 'relative' }}
+                  >
+                    <MoreVert />
+                  </Fab>
+                  
+                  {/* Action Menu */}
+                  <Menu
+                    anchorEl={actionMenuAnchor}
+                    open={actionMenuOpen}
+                    onClose={() => setActionMenuAnchor(null)}
+                    anchorOrigin={{
+                      vertical: 'bottom',
+                      horizontal: 'right',
+                    }}
+                    transformOrigin={{
+                      vertical: 'top',
+                      horizontal: 'right',
+                    }}
+                    PaperProps={{
+                      sx: { minWidth: 280, maxHeight: 600, overflow: 'auto' }
+                    }}
+                  >
+                    {/* Send for Review Section - Regular users only */}
+                    {currentRole !== 'admin' && (
+                      <>
+                        <MenuItem
+                          onClick={() => {
+                            handleBulkSendSelectedForReview();
+                            setActionMenuAnchor(null);
+                          }}
+                          disabled={selectedChecks.size === 0 || Array.from(selectedChecks).some(checkId => checksSentForReview.has(checkId))}
+                        >
+                          <ListItemIcon><Send fontSize="small" /></ListItemIcon>
+                          <ListItemText>Send Selected for Review ({selectedChecks.size})</ListItemText>
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => {
+                            handleSendAllUnreviewedForReview();
+                            setActionMenuAnchor(null);
+                          }}
+                          disabled={filteredChecks.filter((check: CheckItem) => !check.reviewed && !checksSentForReview.has(check.id)).length === 0}
+                        >
+                          <ListItemIcon><Send fontSize="small" /></ListItemIcon>
+                          <ListItemText>Send All Unreviewed ({filteredChecks.filter((check: CheckItem) => !check.reviewed).length})</ListItemText>
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => {
+                            handleBulkDeleteSelected();
+                            setActionMenuAnchor(null);
+                          }}
+                          disabled={selectedChecks.size === 0 || !Array.from(selectedChecks).some(checkId => {
+                            const check = filteredChecks.find(c => c.id === checkId);
+                            return check && !check.reviewed;
+                          })}
+                        >
+                          <ListItemIcon><DeleteIcon fontSize="small" /></ListItemIcon>
+                          <ListItemText>Delete Selected ({selectedChecks.size})</ListItemText>
+                        </MenuItem>
+                        <Divider />
+                      </>
+                    )}
+                    
+                    {/* Print & Export Section - If user has permission */}
+                    {canPrintChecks && (
+                      <>
+                        <MenuItem
+                          onClick={() => {
+                            handlePrintReviewedChecks(selectedCompanyId, selectedWeekKey);
+                            setActionMenuAnchor(null);
+                          }}
+                          disabled={!selectedCompanyId || !selectedWeekKey}
+                        >
+                          <ListItemIcon><Print fontSize="small" /></ListItemIcon>
+                          <ListItemText>Print Reviewed Checks</ListItemText>
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => {
+                            handleExportReviewedChecksExcel(selectedCompanyId, selectedWeekKey);
+                            setActionMenuAnchor(null);
+                          }}
+                          disabled={!selectedCompanyId || !selectedWeekKey}
+                        >
+                          <ListItemIcon><FileDownload fontSize="small" /></ListItemIcon>
+                          <ListItemText>Export Reviewed Checks (Excel)</ListItemText>
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => {
+                            handlePrintSelectedChecks();
+                            setActionMenuAnchor(null);
+                          }}
+                          disabled={selectedChecks.size === 0}
+                        >
+                          <ListItemIcon><Print fontSize="small" /></ListItemIcon>
+                          <ListItemText>Print Selected ({selectedChecks.size})</ListItemText>
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => {
+                            handleExportSelectedChecksExcel();
+                            setActionMenuAnchor(null);
+                          }}
+                          disabled={selectedChecks.size === 0}
+                        >
+                          <ListItemIcon><FileDownload fontSize="small" /></ListItemIcon>
+                          <ListItemText>Export Selected ({selectedChecks.size}) Excel</ListItemText>
+                        </MenuItem>
+                        <Divider />
+                      </>
+                    )}
+                    
+                    {/* Admin Review Section */}
+                    {currentRole === 'admin' && selectedCompanyId && selectedWeekKey && (
+                      <>
+                        <MenuItem
+                          onClick={() => {
+                            handleReviewSelectedChecks();
+                            setActionMenuAnchor(null);
+                          }}
+                          disabled={selectedChecks.size === 0}
+                        >
+                          <ListItemIcon><CheckCircle fontSize="small" /></ListItemIcon>
+                          <ListItemText>Review Selected ({selectedChecks.size})</ListItemText>
+                        </MenuItem>
+                        <MenuItem
+                          onClick={() => {
+                            handleDirectReviewAll();
+                            setActionMenuAnchor(null);
+                          }}
+                          disabled={!selectedCompanyId || !selectedWeekKey}
+                        >
+                          <ListItemIcon><CheckCircle fontSize="small" /></ListItemIcon>
+                          <ListItemText>Mark All as Reviewed</ListItemText>
+                        </MenuItem>
+                      </>
+                    )}
+                  </Menu>
                 </Box>
               )}
 
@@ -2745,7 +3141,46 @@ const [userLoaded, setUserLoaded] = useState(false);
               )}
               <Divider sx={{ my: 1 }} />
               {selectedWeekKey && checksByWeek[selectedWeekKey]?.length ? (
-                checksByWeek[selectedWeekKey]?.map((check: CheckItem) => {
+                <>
+                  {/* Select All Header */}
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 1,
+                      p: 1,
+                      mb: 1,
+                      border: '1px solid #ddd',
+                      borderRadius: 1,
+                      backgroundColor: '#f5f5f5',
+                      cursor: 'pointer',
+                      '&:hover': {
+                        backgroundColor: '#eeeeee'
+                      }
+                    }}
+                    onClick={handleToggleSelectAll}
+                  >
+                    <Checkbox
+                      checked={
+                        checksByWeek[selectedWeekKey]?.length > 0 &&
+                        checksByWeek[selectedWeekKey]?.every(check => selectedChecks.has(check.id))
+                      }
+                      indeterminate={
+                        selectedChecks.size > 0 &&
+                        selectedChecks.size < (checksByWeek[selectedWeekKey]?.length || 0)
+                      }
+                      onChange={handleToggleSelectAll}
+                      size="small"
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    <Typography variant="body2" sx={{ fontWeight: 'bold', userSelect: 'none' }}>
+                      {selectedChecks.size === (checksByWeek[selectedWeekKey]?.length || 0) && selectedChecks.size > 0
+                        ? 'Deselect All'
+                        : 'Select All'}
+                    </Typography>
+                  </Box>
+                  
+                  {checksByWeek[selectedWeekKey]?.map((check: CheckItem) => {
                   const d = check.date?.toDate ? check.date.toDate() : new Date(check.date);
                   const madeByName = typeof check.createdBy === 'string' ? userMap[check.createdBy] || 'Unknown' : 'Unknown';
                   const isSelected = selectedChecks.has(check.id);
@@ -2793,14 +3228,14 @@ const [userLoaded, setUserLoaded] = useState(false);
                         {/* Status Chips */}
                         <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
                         {check.reviewed ? (
-                            <Chip label="✓" color="success" size="small" sx={{ minWidth: 32 }} />
+                            <Chip label="Reviewed" color="success" size="small" sx={{ minWidth: 32 }} />
 ) : (
-                            <Chip label="⏳" color="warning" size="small" sx={{ minWidth: 32 }} />
+                            <Chip label="Pending" color="warning" size="small" sx={{ minWidth: 32 }} />
                           )}
                           {check.paid ? (
-                            <Chip label="💰" color="success" size="small" sx={{ minWidth: 32 }} />
+                            <Chip label="Paid" color="success" size="small" sx={{ minWidth: 32 }} />
                           ) : (
-                            <Chip label="💳" color="default" size="small" sx={{ minWidth: 32 }} />
+                            <Chip label="Unpaid" color="default" size="small" sx={{ minWidth: 32 }} />
     )}
   </Box>
 
@@ -2832,7 +3267,8 @@ const [userLoaded, setUserLoaded] = useState(false);
                       </Box>
                     </Box>
                   );
-                })
+                })}
+                </>
               ) : (
                 <Typography>No checks found for this week.</Typography>
               )}
@@ -2855,38 +3291,84 @@ const [userLoaded, setUserLoaded] = useState(false);
         </Box>
       )}
 
-      <Dialog open={openDialog} onClose={handleCloseDialog} maxWidth="sm" fullWidth>
-        <DialogTitle>Check Details</DialogTitle>
-        <DialogContent dividers>
+      <Dialog 
+        open={openDialog} 
+        onClose={handleCloseDialog} 
+        maxWidth="sm" 
+        fullWidth
+        PaperProps={{
+          sx: {
+            borderRadius: 2,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.12)'
+          }
+        }}
+      >
+        <DialogTitle sx={{ 
+          pb: 2, 
+          borderBottom: '1px solid #e0e0e0',
+          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+          color: 'white',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1
+        }}>
+          <AssignmentIcon sx={{ fontSize: 24 }} />
+          <Typography variant="h6" fontWeight="600" component="span">
+            Check Details
+          </Typography>
+        </DialogTitle>
+        <DialogContent sx={{ p: 2, backgroundColor: '#fafafa' }}>
           {selectedCheck ? (
             <>
-              <Typography><strong>Employee:</strong> {selectedCheck.employeeName}</Typography>
-              <Typography><strong>Company:</strong> {companies.find(c => c.id === selectedCheck.companyId)?.name}</Typography>
-              <Typography><strong>Client:</strong> {
-                selectedCheck.relationshipDetails && selectedCheck.relationshipDetails.length > 0
-                  ? selectedCheck.relationshipDetails.map(rel => {
-                      const client = clients.find(c => c.name === rel.clientName);
-                      return client && client.division 
-                        ? `${rel.clientName} (${client.division})`
-                        : rel.clientName;
-                    }).join(' + ')
-                  : selectedCheck.clientId && selectedCheck.clientId !== 'multiple'
-                    ? (() => {
-                        const client = clients.find(c => c.id === selectedCheck.clientId);
-                        return client && client.division 
-                          ? `${client.name} (${client.division})`
-                          : client?.name || 'Unknown Client';
-                      })()
-                    : 'Multiple Clients'
-              }</Typography>
-              <Divider sx={{ my: 1 }} />
+              {/* Employee, Company, Client Info Cards */}
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, 1fr)' }, gap: 1.5, mb: 2 }}>
+                <Card sx={{ p: 2, borderRadius: 2, boxShadow: '0 2px 8px rgba(0,0,0,0.08)', backgroundColor: 'white' }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.5, fontSize: '0.7rem', fontWeight: 600 }}>
+                    Employee
+                  </Typography>
+                  <Typography variant="h6" fontWeight="bold" sx={{ mt: 0.5, color: '#1976d2' }}>
+                    {selectedCheck.employeeName}
+                  </Typography>
+                </Card>
+                <Card sx={{ p: 2, borderRadius: 2, boxShadow: '0 2px 8px rgba(0,0,0,0.08)', backgroundColor: 'white' }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.5, fontSize: '0.7rem', fontWeight: 600 }}>
+                    Company
+                  </Typography>
+                  <Typography variant="h6" fontWeight="bold" sx={{ mt: 0.5, color: '#1976d2' }}>
+                    {companies.find(c => c.id === selectedCheck.companyId)?.name || 'Unknown'}
+                  </Typography>
+                </Card>
+                <Card sx={{ p: 2, borderRadius: 2, boxShadow: '0 2px 8px rgba(0,0,0,0.08)', backgroundColor: 'white' }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.5, fontSize: '0.7rem', fontWeight: 600 }}>
+                    Client
+                  </Typography>
+                  <Typography variant="h6" fontWeight="bold" sx={{ mt: 0.5, color: '#1976d2' }}>
+                    {selectedCheck.relationshipDetails && selectedCheck.relationshipDetails.length > 0
+                      ? selectedCheck.relationshipDetails.map(rel => {
+                          const client = clients.find(c => c.name === rel.clientName);
+                          return client && client.division 
+                            ? `${rel.clientName} (${client.division})`
+                            : rel.clientName;
+                        }).join(' + ')
+                      : selectedCheck.clientId && selectedCheck.clientId !== 'multiple'
+                        ? (() => {
+                            const client = clients.find(c => c.id === selectedCheck.clientId);
+                            return client && client.division 
+                              ? `${client.name} (${client.division})`
+                              : client?.name || 'Unknown Client';
+                          })()
+                        : 'Multiple Clients'}
+                  </Typography>
+                </Card>
+              </Box>
               {/* Show relationship-based data if available, otherwise show basic fields */}
               {selectedCheck.relationshipDetails && selectedCheck.relationshipDetails.length > 0 ? (
                 // Relationship-based check - show detailed relationship breakdown
                 <>
                   {/* Detailed Relationship Breakdown */}
-              <Box sx={{ mt: 2, p: 2, backgroundColor: '#f8f9fa', borderRadius: 1, border: '1px solid #e9ecef' }}>
-                    <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1.5, color: '#495057', fontSize: '1rem' }}>
+              <Card sx={{ mt: 2, p: 2, borderRadius: 2, boxShadow: '0 2px 12px rgba(0,0,0,0.08)', backgroundColor: 'white', border: '1px solid #e0e0e0' }}>
+                    <Typography variant="h6" fontWeight="bold" sx={{ mb: 2, color: '#1976d2', fontSize: '1rem', display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <GroupWorkIcon sx={{ fontSize: 20 }} />
                       Relationship Breakdown
                 </Typography>
                     
@@ -2894,7 +3376,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, mb: 2 }}>
                       {selectedCheck.relationshipDetails.map((rel, index) => {
                         // Comprehensive debug logging for each relationship
-                        console.log('🔍 DEBUG relationshipDetails mapping:', {
+                        logger.log('[DEBUG] relationshipDetails mapping:', {
                           index,
                           relationshipId: rel.id,
                           clientName: rel.clientName,
@@ -2917,25 +3399,31 @@ const [userLoaded, setUserLoaded] = useState(false);
                         });
                         
                         return (
-                        <Box key={index} sx={{ 
-                          p: 1.5, 
+                        <Card key={index} sx={{ 
+                          p: 2, 
+                          mb: 1.5,
                           backgroundColor: 'white', 
-                          borderRadius: 1, 
+                          borderRadius: 2, 
                           border: `2px solid ${rel.payType === 'hourly' ? '#e3f2fd' : '#fff8e1'}`,
-                          boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+                          transition: 'all 0.2s ease',
+                          '&:hover': {
+                            boxShadow: '0 6px 16px rgba(0,0,0,0.12)',
+                            transform: 'translateY(-2px)'
+                          }
                         }}>
                           {/* Relationship Header */}
                           <Box sx={{ 
                             display: 'flex', 
                             justifyContent: 'space-between', 
                             alignItems: 'center', 
-                            mb: 1,
-                            pb: 0.5,
-                            borderBottom: `1px solid ${rel.payType === 'hourly' ? '#e3f2fd' : '#fff8e1'}`
+                            mb: 1.5,
+                            pb: 1,
+                            borderBottom: `2px solid ${rel.payType === 'hourly' ? '#e3f2fd' : '#fff8e1'}`
                           }}>
-                            <Typography variant="subtitle1" fontWeight="bold" sx={{ 
+                            <Typography variant="h6" fontWeight="bold" sx={{ 
                               color: rel.payType === 'hourly' ? '#1976d2' : '#f57c00',
-                              fontSize: '0.95rem'
+                              fontSize: '1rem'
                             }}>
                               {(() => {
                                 const client = clients.find(c => c.name === rel.clientName);
@@ -2946,12 +3434,14 @@ const [userLoaded, setUserLoaded] = useState(false);
                             </Typography>
                             <Chip 
                               label={rel.payType === 'hourly' ? 'Hourly' : 'Per Diem'} 
-                              size="small"
+                              size="medium"
                               sx={{ 
                                 backgroundColor: rel.payType === 'hourly' ? '#e3f2fd' : '#fff8e1',
                                 color: rel.payType === 'hourly' ? '#1976d2' : '#f57c00',
                                 fontWeight: 'bold',
-                                fontSize: '0.75rem'
+                                fontSize: '0.8rem',
+                                px: 1,
+                                height: 28
                               }}
                             />
                           </Box>
@@ -2973,7 +3463,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                                 const hoursToShow = relHours > 0 ? relHours : mainHours;
                                 
                                 // Debug logging
-                                console.log('🔍 DEBUG relationshipHours:', {
+                                logger.log('[DEBUG] relationshipHours:', {
                                   relationshipId: rel.id,
                                   relationshipHours: selectedCheck.relationshipHours,
                                   relHours: relHours,
@@ -3002,7 +3492,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                               {/* Show OT and Holiday hours - relationship-specific first, then fallback to check-wide */}
                               {(() => {
                                 // Debug logging for OT/Holiday/Other pay
-                                console.log('🔍 DEBUG relationship OT/Holiday/Other:', {
+                                logger.log('[DEBUG] relationship OT/Holiday/Other:', {
                                   relationshipId: rel.id,
                                   relOtHours: rel.otHours,
                                   relHolidayHours: rel.holidayHours,
@@ -3045,34 +3535,110 @@ const [userLoaded, setUserLoaded] = useState(false);
                                 const hasRelOtherPay = rel.otherPay && rel.otherPay.length > 0 && rel.otherPay.some((item: any) => parseFloat(item.amount || '0') > 0);
                                 const hasCheckOtherPay = selectedCheck.otherPay && selectedCheck.otherPay.length > 0 && selectedCheck.otherPay.some((item: any) => parseFloat(item.amount || '0') > 0);
                                 
+                                // Calculate hourly relationship subtotal
+                                const relHours = rel.hours || selectedCheck.relationshipHours?.[rel.id] || 0;
+                                const mainHours = selectedCheck.hours || 0;
+                                const hoursToShow = relHours > 0 ? relHours : mainHours;
+                                const payRate = rel.payRate || parseFloat(selectedCheck.payRate?.toString() || '0');
+                                const otHours = rel.otHours || selectedCheck.otHours || 0;
+                                const holidayHours = rel.holidayHours || selectedCheck.holidayHours || 0;
+                                
+                                const regularPay = hoursToShow * payRate;
+                                const otPay = otHours * payRate * 1.5;
+                                const holidayPay = holidayHours * payRate * 2;
+                                
+                                // Calculate other pay total
+                                let otherPayTotal = 0;
+                                if (hasRelOtherPay && rel.otherPay) {
+                                  otherPayTotal = rel.otherPay.reduce((sum: number, item: any) => sum + (parseFloat(item.amount || '0')), 0);
+                                } else if (hasCheckOtherPay && selectedCheck.otherPay) {
+                                  otherPayTotal = selectedCheck.otherPay.reduce((sum: number, item: any) => sum + (parseFloat(item.amount || '0')), 0);
+                                }
+                                
+                                const relationshipSubtotal = regularPay + otPay + holidayPay + otherPayTotal;
+                                
                                 if (hasRelOtherPay && rel.otherPay) {
                                   return (
                                     <>
-                                      {rel.otherPay!.map((item: any, index: number) => (
-                                        parseFloat(item.amount || '0') > 0 && (
-                                          <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                            <span>{item.description || 'Other Pay'}:</span>
-                                            <span style={{ fontWeight: 'bold' }}>
-                                              ${parseFloat(item.amount || '0').toFixed(2)}
-                                            </span>
+                                      <Box sx={{ mt: 1.5, pt: 1, borderTop: '1px solid #e0e0e0' }}>
+                                        <Typography variant="caption" sx={{ color: '#666', fontWeight: 600, mb: 0.5, display: 'block' }}>
+                                          Other Pay Items:
+                                        </Typography>
+                                        {rel.otherPay!.map((item: any, index: number) => (
+                                          parseFloat(item.amount || '0') > 0 && (
+                                            <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5, fontSize: '0.85rem' }}>
+                                              <span style={{ color: '#616161' }}>{item.description || 'Other Pay'}:</span>
+                                              <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
+                                                ${parseFloat(item.amount || '0').toFixed(2)}
+                                              </span>
+                                            </Box>
+                                          )
+                                        ))}
+                                      </Box>
+                                      {relationshipSubtotal > 0 && (
+                                        <Box sx={{ mt: 1.5, pt: 1, borderTop: '2px solid #e0e0e0' }}>
+                                          <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', fontWeight: 'bold' }}>
+                                            <span style={{ color: '#2e7d32' }}>Relationship Subtotal:</span>
+                                            <span style={{ color: '#2e7d32' }}>${relationshipSubtotal.toFixed(2)}</span>
                                           </Box>
-                                        )
-                                      ))}
+                                        </Box>
+                                      )}
                                     </>
                                   );
                                 } else if (hasCheckOtherPay && selectedCheck.otherPay) {
                                   return (
                                     <>
-                                      {selectedCheck.otherPay!.map((item: any, index: number) => (
-                                        parseFloat(item.amount || '0') > 0 && (
-                                          <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                            <span>{item.description || 'Other Pay'}:</span>
-                                            <span style={{ fontWeight: 'bold' }}>
-                                              ${parseFloat(item.amount || '0').toFixed(2)}
+                                      <Box sx={{ mt: 1.5, pt: 1, borderTop: '1px solid #e0e0e0' }}>
+                                        <Typography variant="caption" sx={{ color: '#666', fontWeight: 600, mb: 0.5, display: 'block' }}>
+                                          Other Pay Items:
+                                        </Typography>
+                                        {selectedCheck.otherPay!.map((item: any, index: number) => (
+                                          parseFloat(item.amount || '0') > 0 && (
+                                            <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5, fontSize: '0.85rem' }}>
+                                              <span style={{ color: '#616161' }}>{item.description || 'Other Pay'}:</span>
+                                              <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
+                                                ${parseFloat(item.amount || '0').toFixed(2)}
+                                              </span>
+                                            </Box>
+                                          )
+                                        ))}
+                                      </Box>
+                                      {relationshipSubtotal > 0 && (
+                                        <Box sx={{ mt: 1.5, pt: 1, borderTop: '2px solid #e0e0e0' }}>
+                                          <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', fontWeight: 'bold' }}>
+                                            <span style={{ color: '#2e7d32' }}>Relationship Subtotal:</span>
+                                            <span style={{ color: '#2e7d32' }}>${relationshipSubtotal.toFixed(2)}</span>
+                                          </Box>
+                                        </Box>
+                                      )}
+                                    </>
+                                  );
+                                }
+                                
+                                // Always show subtotal if there's other pay or if it's different from hourly pay only
+                                const hourlyPayOnly = regularPay + otPay + holidayPay;
+                                if (otherPayTotal > 0 || relationshipSubtotal !== hourlyPayOnly) {
+                                  return (
+                                    <>
+                                      {otherPayTotal > 0 && !hasRelOtherPay && !hasCheckOtherPay && (
+                                        <Box sx={{ mt: 1.5, pt: 1, borderTop: '1px solid #e0e0e0' }}>
+                                          <Typography variant="caption" sx={{ color: '#666', fontWeight: 600, mb: 0.5, display: 'block' }}>
+                                            Other Pay Items:
+                                          </Typography>
+                                          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5, fontSize: '0.85rem' }}>
+                                            <span style={{ color: '#616161' }}>Other Pay:</span>
+                                            <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
+                                              ${otherPayTotal.toFixed(2)}
                                             </span>
                                           </Box>
-                                        )
-                                      ))}
+                                        </Box>
+                                      )}
+                                      <Box sx={{ mt: 1.5, pt: 1, borderTop: '2px solid #e0e0e0' }}>
+                                        <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', fontWeight: 'bold' }}>
+                                          <span style={{ color: '#2e7d32' }}>Relationship Subtotal:</span>
+                                          <span style={{ color: '#2e7d32' }}>${relationshipSubtotal.toFixed(2)}</span>
+                                        </Box>
+                                      </Box>
                                     </>
                                   );
                                 }
@@ -3110,7 +3676,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                                   return (
                                     <Box sx={{ mt: 0.5 }}>
                                       <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
-                                        <span>Total Amount:</span>
+                                        <span>Per Diem Amount:</span>
                                         <span style={{ fontWeight: 'bold' }}>${totalRelDaily.toFixed(2)}</span>
                                       </Box>
                                       <Typography variant="caption" sx={{ color: '#666', display: 'block', mb: 0.5 }}>
@@ -3196,7 +3762,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                                     return (
                                       <Box sx={{ mt: 0.5 }}>
                                         <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
-                                          <span>Total Amount:</span>
+                                          <span>Per Diem Amount:</span>
                                           <span style={{ fontWeight: 'bold' }}>${Number(perDiemAmount).toFixed(2)}</span>
                                         </Box>
                                       </Box>
@@ -3223,34 +3789,130 @@ const [userLoaded, setUserLoaded] = useState(false);
                                 const hasRelOtherPay = rel.otherPay && rel.otherPay.length > 0 && rel.otherPay.some((item: any) => parseFloat(item.amount || '0') > 0);
                                 const hasCheckOtherPay = selectedCheck.otherPay && selectedCheck.otherPay.length > 0 && selectedCheck.otherPay.some((item: any) => parseFloat(item.amount || '0') > 0);
                                 
+                                // Check for relationship-specific daily amounts
+                                const hasRelDailyAmounts = [
+                                  rel.perdiemMonday,
+                                  rel.perdiemTuesday,
+                                  rel.perdiemWednesday,
+                                  rel.perdiemThursday,
+                                  rel.perdiemFriday,
+                                  rel.perdiemSaturday,
+                                  rel.perdiemSunday
+                                ].some(amount => amount !== undefined && amount > 0);
+                                
+                                // Calculate per diem base amount
+                                let perDiemBaseAmount = 0;
+                                if (hasRelDailyAmounts) {
+                                  perDiemBaseAmount = (rel.perdiemMonday || 0) + (rel.perdiemTuesday || 0) + (rel.perdiemWednesday || 0) + 
+                                                    (rel.perdiemThursday || 0) + (rel.perdiemFriday || 0) + (rel.perdiemSaturday || 0) + (rel.perdiemSunday || 0);
+                                } else if (rel.perdiemAmount && rel.perdiemAmount > 0) {
+                                  perDiemBaseAmount = rel.perdiemAmount;
+                                } else if (selectedCheck.perdiemAmount && selectedCheck.perdiemAmount > 0) {
+                                  perDiemBaseAmount = selectedCheck.perdiemAmount;
+                                }
+                                
+                                // Calculate other pay total - check both relationship and check level
+                                let otherPayTotal = 0;
+                                if (hasRelOtherPay && rel.otherPay) {
+                                  otherPayTotal = rel.otherPay.reduce((sum: number, item: any) => sum + (parseFloat(item.amount || '0')), 0);
+                                } else if (hasCheckOtherPay && selectedCheck.otherPay) {
+                                  otherPayTotal = selectedCheck.otherPay.reduce((sum: number, item: any) => sum + (parseFloat(item.amount || '0')), 0);
+                                }
+                                
+                                // If we have a single relationship and the check total doesn't match per diem + other pay,
+                                // infer the missing other pay amount from the difference
+                                if (selectedCheck.relationshipDetails && selectedCheck.relationshipDetails.length === 1) {
+                                  const checkTotal = parseFloat(selectedCheck.amount?.toString() || '0');
+                                  const calculatedTotal = perDiemBaseAmount + otherPayTotal;
+                                  if (checkTotal > calculatedTotal && otherPayTotal === 0) {
+                                    // There's other pay that's not explicitly stored in otherPay array
+                                    otherPayTotal = checkTotal - perDiemBaseAmount;
+                                  }
+                                }
+                                
+                                const relationshipSubtotal = perDiemBaseAmount + otherPayTotal;
+                                
                                 if (hasRelOtherPay && rel.otherPay) {
                                   return (
                                     <>
-                                      {rel.otherPay!.map((item: any, index: number) => (
-                                        parseFloat(item.amount || '0') > 0 && (
-                                          <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between', mt: 0.5 }}>
-                                            <span>{item.description || 'Other Pay'}:</span>
-                                            <span style={{ fontWeight: 'bold' }}>
-                                              ${parseFloat(item.amount || '0').toFixed(2)}
-                                            </span>
+                                      <Box sx={{ mt: 1.5, pt: 1, borderTop: '1px solid #e0e0e0' }}>
+                                        <Typography variant="caption" sx={{ color: '#666', fontWeight: 600, mb: 0.5, display: 'block' }}>
+                                          Other Pay Items:
+                                        </Typography>
+                                        {rel.otherPay!.map((item: any, index: number) => (
+                                          parseFloat(item.amount || '0') > 0 && (
+                                            <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5, fontSize: '0.85rem' }}>
+                                              <span style={{ color: '#616161' }}>{item.description || 'Other Pay'}:</span>
+                                              <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
+                                                ${parseFloat(item.amount || '0').toFixed(2)}
+                                              </span>
+                                            </Box>
+                                          )
+                                        ))}
+                                      </Box>
+                                      {relationshipSubtotal > 0 && (
+                                        <Box sx={{ mt: 1.5, pt: 1, borderTop: '2px solid #e0e0e0' }}>
+                                          <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', fontWeight: 'bold' }}>
+                                            <span style={{ color: '#2e7d32' }}>Relationship Subtotal:</span>
+                                            <span style={{ color: '#2e7d32' }}>${relationshipSubtotal.toFixed(2)}</span>
                                           </Box>
-                                        )
-                                      ))}
+                                        </Box>
+                                      )}
                                     </>
                                   );
                                 } else if (hasCheckOtherPay && selectedCheck.otherPay) {
                                   return (
                                     <>
-                                      {selectedCheck.otherPay!.map((item: any, index: number) => (
-                                        parseFloat(item.amount || '0') > 0 && (
-                                          <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between', mt: 0.5 }}>
-                                            <span>{item.description || 'Other Pay'}:</span>
-                                            <span style={{ fontWeight: 'bold' }}>
-                                              ${parseFloat(item.amount || '0').toFixed(2)}
+                                      <Box sx={{ mt: 1.5, pt: 1, borderTop: '1px solid #e0e0e0' }}>
+                                        <Typography variant="caption" sx={{ color: '#666', fontWeight: 600, mb: 0.5, display: 'block' }}>
+                                          Other Pay Items:
+                                        </Typography>
+                                        {selectedCheck.otherPay!.map((item: any, index: number) => (
+                                          parseFloat(item.amount || '0') > 0 && (
+                                            <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5, fontSize: '0.85rem' }}>
+                                              <span style={{ color: '#616161' }}>{item.description || 'Other Pay'}:</span>
+                                              <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
+                                                ${parseFloat(item.amount || '0').toFixed(2)}
+                                              </span>
+                                            </Box>
+                                          )
+                                        ))}
+                                      </Box>
+                                      {relationshipSubtotal > 0 && (
+                                        <Box sx={{ mt: 1.5, pt: 1, borderTop: '2px solid #e0e0e0' }}>
+                                          <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', fontWeight: 'bold' }}>
+                                            <span style={{ color: '#2e7d32' }}>Relationship Subtotal:</span>
+                                            <span style={{ color: '#2e7d32' }}>${relationshipSubtotal.toFixed(2)}</span>
+                                          </Box>
+                                        </Box>
+                                      )}
+                                    </>
+                                  );
+                                }
+                                
+                                // Always show subtotal if there's other pay or if it's different from per diem amount
+                                if (otherPayTotal > 0 || relationshipSubtotal !== perDiemBaseAmount) {
+                                  return (
+                                    <>
+                                      {otherPayTotal > 0 && !hasRelOtherPay && !hasCheckOtherPay && (
+                                        <Box sx={{ mt: 1.5, pt: 1, borderTop: '1px solid #e0e0e0' }}>
+                                          <Typography variant="caption" sx={{ color: '#666', fontWeight: 600, mb: 0.5, display: 'block' }}>
+                                            Other Pay Items:
+                                          </Typography>
+                                          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5, fontSize: '0.85rem' }}>
+                                            <span style={{ color: '#616161' }}>Other Pay:</span>
+                                            <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
+                                              ${otherPayTotal.toFixed(2)}
                                             </span>
                                           </Box>
-                                        )
-                                      ))}
+                                        </Box>
+                                      )}
+                                      <Box sx={{ mt: 1.5, pt: 1, borderTop: '2px solid #e0e0e0' }}>
+                                        <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', fontWeight: 'bold' }}>
+                                          <span style={{ color: '#2e7d32' }}>Relationship Subtotal:</span>
+                                          <span style={{ color: '#2e7d32' }}>${relationshipSubtotal.toFixed(2)}</span>
+                                        </Box>
+                                      </Box>
                                     </>
                                   );
                                 }
@@ -3269,7 +3931,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                               {/* Only show daily breakdown if there are actual daily amounts > 0 */}
                               {(() => {
                                 // Debug logging for per diem - show the full check data
-                                console.log('🔍 DEBUG perDiem FULL CHECK DATA:', {
+                                logger.log('[DEBUG] perDiem FULL CHECK DATA:', {
                                   relationshipId: rel.id,
                                   fullCheckData: selectedCheck,
                                   perdiemBreakdown: selectedCheck.perdiemBreakdown,
@@ -3314,7 +3976,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                                   return (
                                     <Box sx={{ mt: 0.5 }}>
                                       <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
-                                        <span>Total Amount:</span>
+                                        <span>Per Diem Amount:</span>
                                         <span style={{ fontWeight: 'bold' }}>${totalRelDaily.toFixed(2)}</span>
                                       </Box>
                                       <Typography variant="caption" sx={{ color: '#666', display: 'block', mb: 0.5 }}>
@@ -3369,7 +4031,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                                 }
                                 
                                 if (!hasDailyAmounts) {
-                                  console.log('🔍 DEBUG perDiem: No daily amounts found, checking for total amount');
+                                  logger.log('[DEBUG] perDiem: No daily amounts found, checking for total amount');
                                   
                                   // Try multiple sources for per diem amount - prioritize relationship-specific
                                   let perDiemAmount = 0;
@@ -3377,12 +4039,12 @@ const [userLoaded, setUserLoaded] = useState(false);
                                   // Check relationship-specific perdiemAmount first
                                   if (rel.perdiemAmount && rel.perdiemAmount > 0) {
                                     perDiemAmount = rel.perdiemAmount;
-                                    console.log('🔍 DEBUG perDiem: Using relationship-specific amount:', perDiemAmount);
+                                    logger.log('[DEBUG] perDiem: Using relationship-specific amount:', perDiemAmount);
                                   }
                                   // Check selectedCheck.perdiemAmount as fallback - but only if no relationship-specific amount
                                   else if (selectedCheck.perdiemAmount && selectedCheck.perdiemAmount > 0) {
                                     perDiemAmount = selectedCheck.perdiemAmount;
-                                    console.log('🔍 DEBUG perDiem: Using check-wide fallback amount:', perDiemAmount);
+                                    logger.log('[DEBUG] perDiem: Using check-wide fallback amount:', perDiemAmount);
                                   }
                                   // Check if there's a relationship-specific amount in the check's amount calculation
                                   else if (selectedCheck.amount && selectedCheck.relationshipDetails && selectedCheck.relationshipDetails.length === 1 && rel.payType === 'perdiem') {
@@ -3400,13 +4062,13 @@ const [userLoaded, setUserLoaded] = useState(false);
                                     }
                                   }
                                   
-                                  console.log('🔍 DEBUG perDiem: Calculated amount:', perDiemAmount);
+                                  logger.log('[DEBUG] perDiem: Calculated amount:', perDiemAmount);
                                   
                                   if (perDiemAmount > 0) {
                                     return (
                                       <Box sx={{ mt: 0.5 }}>
                                         <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
-                                          <span>Total Amount:</span>
+                                          <span>Per Diem Amount:</span>
                                           <span style={{ fontWeight: 'bold' }}>${Number(perDiemAmount).toFixed(2)}</span>
                                         </Box>
                                       </Box>
@@ -3492,7 +4154,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                               )}
                     </Box>
                   )}
-                  </Box>
+                  </Card>
                         );
                       })}
                 </Box>
@@ -3501,55 +4163,60 @@ const [userLoaded, setUserLoaded] = useState(false);
                     
                     {/* Total Amount */}
                     <Box sx={{ 
-                      mt: 1.5, 
-                      p: 1.5, 
-                      backgroundColor: '#f5f5f5', 
-                      borderRadius: 1, 
-                      border: '2px solid #e0e0e0',
-                      textAlign: 'center'
+                      mt: 3, 
+                      p: 3, 
+                      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                      borderRadius: 2, 
+                      border: 'none',
+                      textAlign: 'center',
+                      boxShadow: '0 4px 16px rgba(102, 126, 234, 0.3)'
                     }}>
-                      <Typography variant="h6" fontWeight="bold" color="#1976d2">
-                        Total Amount: ${(parseFloat(selectedCheck.amount?.toString() || '0')).toFixed(2)}
+                      <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.9)', textTransform: 'uppercase', letterSpacing: 1, fontSize: '0.75rem', fontWeight: 600 }}>
+                        Total Amount
+                      </Typography>
+                      <Typography variant="h4" fontWeight="bold" sx={{ color: 'white', mt: 0.5 }}>
+                        ${(parseFloat(selectedCheck.amount?.toString() || '0')).toFixed(2)}
                       </Typography>
                     </Box>
-                  </Box>
+                  </Card>
                 </>
               ) : (
                 // Basic check - show traditional fields with better formatting
                 <>
                   {/* Basic Check Information */}
-                  <Box sx={{ mt: 2, p: 2, backgroundColor: '#f8f9fa', borderRadius: 1, border: '1px solid #e9ecef' }}>
-                    <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1.5, color: '#495057', fontSize: '1rem' }}>
+                  <Card sx={{ mt: 2, p: 2, borderRadius: 2, boxShadow: '0 2px 12px rgba(0,0,0,0.08)', backgroundColor: 'white', border: '1px solid #e0e0e0' }}>
+                    <Typography variant="h6" fontWeight="bold" sx={{ mb: 2, color: '#1976d2', fontSize: '1rem', display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <AssignmentIcon sx={{ fontSize: 20 }} />
                       Check Details
                     </Typography>
                     
                     {/* Hourly Information */}
                     {(selectedCheck.hours && selectedCheck.hours > 0) || (selectedCheck.otHours && selectedCheck.otHours > 0) || (selectedCheck.holidayHours && selectedCheck.holidayHours > 0) || (selectedCheck.otherPay && selectedCheck.otherPay.length > 0 && selectedCheck.otherPay.some((item: any) => parseFloat(item.amount || '0') > 0)) ? (
-                      <Box sx={{ mb: 2 }}>
-                        <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1, color: '#1976d2' }}>
+                      <Box sx={{ mb: 3 }}>
+                        <Typography variant="subtitle1" fontWeight="bold" sx={{ mb: 1.5, color: '#1976d2', fontSize: '0.95rem' }}>
                           Hourly Breakdown
                         </Typography>
-                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, fontSize: '0.85rem' }}>
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, fontSize: '0.9rem' }}>
                           {selectedCheck.hours && selectedCheck.hours > 0 && (
-                            <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5, backgroundColor: 'white', borderRadius: 0.5 }}>
-                              <span>Regular Hours:</span>
-                              <span style={{ fontWeight: 'bold' }}>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 1.5, backgroundColor: '#f5f5f5', borderRadius: 1.5, border: '1px solid #e0e0e0' }}>
+                              <span style={{ color: '#616161' }}>Regular Hours:</span>
+                              <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
                                 {selectedCheck.hours}h × ${(parseFloat(selectedCheck.payRate?.toString() || '0')).toFixed(2)} = ${((selectedCheck.hours || 0) * (parseFloat(selectedCheck.payRate?.toString() || '0'))).toFixed(2)}
                               </span>
                             </Box>
                           )}
                           {selectedCheck.otHours && selectedCheck.otHours > 0 && (
-                            <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5, backgroundColor: 'white', borderRadius: 0.5 }}>
-                              <span>OT Hours:</span>
-                              <span style={{ fontWeight: 'bold' }}>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 1.5, backgroundColor: '#f5f5f5', borderRadius: 1.5, border: '1px solid #e0e0e0' }}>
+                              <span style={{ color: '#616161' }}>OT Hours:</span>
+                              <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
                                 {selectedCheck.otHours}h × ${(parseFloat(selectedCheck.payRate?.toString() || '0') * 1.5).toFixed(2)} = ${((selectedCheck.otHours || 0) * (parseFloat(selectedCheck.payRate?.toString() || '0')) * 1.5).toFixed(2)}
                               </span>
                             </Box>
                           )}
                           {selectedCheck.holidayHours && selectedCheck.holidayHours > 0 && (
-                            <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5, backgroundColor: 'white', borderRadius: 0.5 }}>
-                              <span>Holiday Hours:</span>
-                              <span style={{ fontWeight: 'bold' }}>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 1.5, backgroundColor: '#f5f5f5', borderRadius: 1.5, border: '1px solid #e0e0e0' }}>
+                              <span style={{ color: '#616161' }}>Holiday Hours:</span>
+                              <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
                                 {selectedCheck.holidayHours}h × ${(parseFloat(selectedCheck.payRate?.toString() || '0') * 2).toFixed(2)} = ${((selectedCheck.holidayHours || 0) * (parseFloat(selectedCheck.payRate?.toString() || '0')) * 2).toFixed(2)}
                               </span>
                             </Box>
@@ -3559,9 +4226,9 @@ const [userLoaded, setUserLoaded] = useState(false);
                             <>
                               {selectedCheck.otherPay.map((item: any, index: number) => (
                                 parseFloat(item.amount || '0') > 0 && (
-                                  <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5, backgroundColor: 'white', borderRadius: 0.5 }}>
-                                    <span>{item.description || 'Other Pay'}:</span>
-                                    <span style={{ fontWeight: 'bold' }}>
+                                  <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between', p: 1.5, backgroundColor: '#f5f5f5', borderRadius: 1.5, border: '1px solid #e0e0e0' }}>
+                                    <span style={{ color: '#616161' }}>{item.description || 'Other Pay'}:</span>
+                                    <span style={{ fontWeight: 'bold', color: '#1976d2' }}>
                                       ${parseFloat(item.amount || '0').toFixed(2)}
                                     </span>
                                   </Box>
@@ -3575,65 +4242,65 @@ const [userLoaded, setUserLoaded] = useState(false);
                     
                     {/* Per Diem Information */}
                     {parseFloat(calculatePerDiemTotal(selectedCheck)) > 0 ? (
-                      <Box sx={{ mb: 2 }}>
-                        <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1, color: '#f57c00' }}>
+                      <Box sx={{ mb: 3 }}>
+                        <Typography variant="subtitle1" fontWeight="bold" sx={{ mb: 1.5, color: '#f57c00', fontSize: '0.95rem' }}>
                           Per Diem Breakdown
                         </Typography>
-                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, fontSize: '0.85rem' }}>
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, fontSize: '0.9rem' }}>
                           {!selectedCheck.perdiemBreakdown && (
-                            <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5, backgroundColor: 'white', borderRadius: 0.5 }}>
-                              <span>Total Per Diem:</span>
-                              <span style={{ fontWeight: 'bold' }}>${calculatePerDiemTotal(selectedCheck)}</span>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 1.5, backgroundColor: '#fff8e1', borderRadius: 1.5, border: '1px solid #ffe082' }}>
+                              <span style={{ color: '#616161' }}>Total Per Diem:</span>
+                              <span style={{ fontWeight: 'bold', color: '#f57c00' }}>${calculatePerDiemTotal(selectedCheck)}</span>
                             </Box>
                           )}
                           
                           {/* Daily Breakdown - Show when perdiemBreakdown is true */}
                           {selectedCheck.perdiemBreakdown && (
-                            <Box sx={{ p: 0.5, backgroundColor: 'white', borderRadius: 0.5 }}>
-                              <Typography variant="caption" sx={{ color: '#666', display: 'block', mb: 0.5 }}>
+                            <Box sx={{ p: 2, backgroundColor: '#fff8e1', borderRadius: 1.5, border: '1px solid #ffe082' }}>
+                              <Typography variant="caption" sx={{ color: '#856404', display: 'block', mb: 1, fontWeight: 600 }}>
                                 Daily Amounts:
                               </Typography>
-                              <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 0.5, fontSize: '0.75rem' }}>
+                              <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 1, fontSize: '0.85rem' }}>
                                 {selectedCheck.perdiemMonday && selectedCheck.perdiemMonday > 0 && (
-                                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                    <span>Monday:</span>
-                                    <span>${selectedCheck.perdiemMonday.toFixed(2)}</span>
+                                  <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5 }}>
+                                    <span style={{ color: '#616161' }}>Monday:</span>
+                                    <span style={{ fontWeight: 'bold', color: '#f57c00' }}>${selectedCheck.perdiemMonday.toFixed(2)}</span>
                                   </Box>
                                 )}
                                 {selectedCheck.perdiemTuesday && selectedCheck.perdiemTuesday > 0 && (
-                                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                    <span>Tuesday:</span>
-                                    <span>${selectedCheck.perdiemTuesday.toFixed(2)}</span>
+                                  <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5 }}>
+                                    <span style={{ color: '#616161' }}>Tuesday:</span>
+                                    <span style={{ fontWeight: 'bold', color: '#f57c00' }}>${selectedCheck.perdiemTuesday.toFixed(2)}</span>
                                   </Box>
                                 )}
                                 {selectedCheck.perdiemWednesday && selectedCheck.perdiemWednesday > 0 && (
-                                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                    <span>Wednesday:</span>
-                                    <span>${selectedCheck.perdiemWednesday.toFixed(2)}</span>
+                                  <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5 }}>
+                                    <span style={{ color: '#616161' }}>Wednesday:</span>
+                                    <span style={{ fontWeight: 'bold', color: '#f57c00' }}>${selectedCheck.perdiemWednesday.toFixed(2)}</span>
                                   </Box>
                                 )}
                                 {selectedCheck.perdiemThursday && selectedCheck.perdiemThursday > 0 && (
-                                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                    <span>Thursday:</span>
-                                    <span>${selectedCheck.perdiemThursday.toFixed(2)}</span>
+                                  <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5 }}>
+                                    <span style={{ color: '#616161' }}>Thursday:</span>
+                                    <span style={{ fontWeight: 'bold', color: '#f57c00' }}>${selectedCheck.perdiemThursday.toFixed(2)}</span>
                                   </Box>
                                 )}
                                 {selectedCheck.perdiemFriday && selectedCheck.perdiemFriday > 0 && (
-                                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                    <span>Friday:</span>
-                                    <span>${selectedCheck.perdiemFriday.toFixed(2)}</span>
+                                  <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5 }}>
+                                    <span style={{ color: '#616161' }}>Friday:</span>
+                                    <span style={{ fontWeight: 'bold', color: '#f57c00' }}>${selectedCheck.perdiemFriday.toFixed(2)}</span>
                                   </Box>
                                 )}
                                 {selectedCheck.perdiemSaturday && selectedCheck.perdiemSaturday > 0 && (
-                                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                    <span>Saturday:</span>
-                                    <span>${selectedCheck.perdiemSaturday.toFixed(2)}</span>
+                                  <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5 }}>
+                                    <span style={{ color: '#616161' }}>Saturday:</span>
+                                    <span style={{ fontWeight: 'bold', color: '#f57c00' }}>${selectedCheck.perdiemSaturday.toFixed(2)}</span>
                                   </Box>
                                 )}
                                 {selectedCheck.perdiemSunday && selectedCheck.perdiemSunday > 0 && (
-                                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                                    <span>Sunday:</span>
-                                    <span>${selectedCheck.perdiemSunday.toFixed(2)}</span>
+                                  <Box sx={{ display: 'flex', justifyContent: 'space-between', p: 0.5 }}>
+                                    <span style={{ color: '#616161' }}>Sunday:</span>
+                                    <span style={{ fontWeight: 'bold', color: '#f57c00' }}>${selectedCheck.perdiemSunday.toFixed(2)}</span>
                                   </Box>
                                 )}
                               </Box>
@@ -3645,63 +4312,137 @@ const [userLoaded, setUserLoaded] = useState(false);
                     
                     {/* Total Amount */}
                     <Box sx={{ 
-                      mt: 1.5, 
-                      p: 1.5, 
-                      backgroundColor: '#f5f5f5', 
-                      borderRadius: 1, 
-                      border: '2px solid #e0e0e0',
-                      textAlign: 'center'
+                      mt: 2, 
+                      p: 2, 
+                      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                      borderRadius: 2, 
+                      border: 'none',
+                      textAlign: 'center',
+                      boxShadow: '0 4px 16px rgba(102, 126, 234, 0.3)'
                     }}>
-                      <Typography variant="h6" fontWeight="bold" color="#1976d2">
-                        Total Amount: ${(parseFloat(selectedCheck.amount?.toString() || '0')).toFixed(2)}
+                      <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.9)', textTransform: 'uppercase', letterSpacing: 1, fontSize: '0.7rem', fontWeight: 600 }}>
+                        Total Amount
+                      </Typography>
+                      <Typography variant="h5" fontWeight="bold" sx={{ color: 'white', mt: 0.5 }}>
+                        ${(parseFloat(selectedCheck.amount?.toString() || '0')).toFixed(2)}
                       </Typography>
                     </Box>
-                  </Box>
+                  </Card>
                 </>
               )}
               {selectedCheck.memo && (
-                <Typography><strong>Memo:</strong> {selectedCheck.memo}</Typography>
+                <Card sx={{ mt: 2, p: 2, borderRadius: 2, boxShadow: '0 2px 8px rgba(0,0,0,0.08)', backgroundColor: '#fffbe6', border: '1px solid #ffe58f' }}>
+                  <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 0.5, color: '#856404', textTransform: 'uppercase', letterSpacing: 0.5, fontSize: '0.7rem' }}>
+                    Memo
+                  </Typography>
+                  <Typography variant="body2" sx={{ color: '#856404' }}>
+                    {selectedCheck.memo}
+                  </Typography>
+                </Card>
               )}
-              <Divider sx={{ my: 1 }} />
-              <Box sx={{ mt: 2, p: 2, backgroundColor: '#f8f9fa', borderRadius: 1, border: '1px solid #e9ecef' }}>
-                <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1, color: '#495057' }}>
+              {/* Expense Check Indicator */}
+              {(selectedCheck as any).isExpense && (
+                <Card sx={{ mt: 2, p: 2, borderRadius: 2, boxShadow: '0 2px 8px rgba(0,0,0,0.08)', backgroundColor: '#fff3e0', border: '2px solid #ff9800' }}>
+                  <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1, color: '#e65100', textTransform: 'uppercase', letterSpacing: 0.5, fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <span>💰</span>
+                    Expense Check
+                  </Typography>
+                  {(selectedCheck as any).expenseName && (
+                    <Typography variant="body1" sx={{ color: '#e65100', fontWeight: 600, mb: 0.5 }}>
+                      Expense Name: {(selectedCheck as any).expenseName}
+                    </Typography>
+                  )}
+                  {(selectedCheck as any).expenseDescription && (
+                    <Typography variant="body2" sx={{ color: '#bf360c', mt: 0.5 }}>
+                      {(selectedCheck as any).expenseDescription}
+                    </Typography>
+                  )}
+                </Card>
+              )}
+              <Card sx={{ mt: 2, p: 2, borderRadius: 2, boxShadow: '0 2px 12px rgba(0,0,0,0.08)', backgroundColor: 'white', border: '1px solid #e0e0e0' }}>
+                <Typography variant="h6" fontWeight="bold" sx={{ mb: 1.5, color: '#1976d2', fontSize: '1rem' }}>
                   Status Information
                 </Typography>
-                <Box sx={{ display: 'flex', gap: 1, mb: 1.5 }}>
-                {selectedCheck.reviewed ? (
-                    <Chip label="Reviewed" color="success" size="small" />
-                ) : (
-                    <Chip label="Pending Review" color="warning" size="small" />
-                )}
-                {selectedCheck.paid ? (
-                    <Chip label="Paid" color="success" size="small" />
-                ) : (
-                    <Chip label="Unpaid" color="default" size="small" />
-                )}
-              </Box>
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, fontSize: '0.85rem' }}>
-              <Typography variant="body2" color="text.secondary">
-                Date: {formatDateForDisplay(selectedCheck.date)}
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                    Created by: {selectedCheck && typeof selectedCheck.createdBy === 'string' ? userMap[selectedCheck.createdBy] || 'Unknown' : 'Unknown'}
-              </Typography>
+                <Box sx={{ display: 'flex', gap: 1.5, mb: 2.5, flexWrap: 'wrap' }}>
+                  {selectedCheck.reviewed ? (
+                    <Chip 
+                      label="Reviewed" 
+                      color="success" 
+                      size="medium"
+                      sx={{ fontWeight: 600, fontSize: '0.85rem', px: 1 }}
+                    />
+                  ) : (
+                    <Chip 
+                      label="Pending Review" 
+                      color="warning" 
+                      size="medium"
+                      sx={{ fontWeight: 600, fontSize: '0.85rem', px: 1 }}
+                    />
+                  )}
+                  {selectedCheck.paid ? (
+                    <Chip 
+                      label="Paid" 
+                      color="success" 
+                      size="medium"
+                      sx={{ fontWeight: 600, fontSize: '0.85rem', px: 1 }}
+                    />
+                  ) : (
+                    <Chip 
+                      label="Unpaid" 
+                      sx={{ 
+                        backgroundColor: '#e0e0e0', 
+                        color: '#616161',
+                        fontWeight: 600, 
+                        fontSize: '0.85rem', 
+                        px: 1 
+                      }}
+                      size="medium"
+                    />
+                  )}
                 </Box>
-                              </Box>
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Typography variant="caption" sx={{ color: '#757575', fontWeight: 600, minWidth: 100, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      Date:
+                    </Typography>
+                    <Typography variant="body1" sx={{ color: '#212121', fontWeight: 500 }}>
+                      {formatDateForDisplay(selectedCheck.date)}
+                    </Typography>
+                  </Box>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Typography variant="caption" sx={{ color: '#757575', fontWeight: 600, minWidth: 100, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      Created by:
+                    </Typography>
+                    <Typography variant="body1" sx={{ color: '#212121', fontWeight: 500 }}>
+                      {selectedCheck && typeof selectedCheck.createdBy === 'string' ? userMap[selectedCheck.createdBy] || 'Unknown' : 'Unknown'}
+                    </Typography>
+                  </Box>
+                </Box>
+              </Card>
             </>
           ) : (
             <Typography>No check selected.</Typography>
           )}
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{ p: 2, pt: 1.5, borderTop: '1px solid #e0e0e0', backgroundColor: '#fafafa', gap: 1.5 }}>
           {selectedCheck && !selectedCheck.reviewed && currentRole === 'admin' && (
             <Button
               variant="contained"
               color="success"
-              sx={{ mt: 2 }}
+              sx={{ 
+                px: 3,
+                py: 1,
+                borderRadius: 2,
+                textTransform: 'none',
+                fontWeight: 600,
+                boxShadow: '0 2px 8px rgba(46, 125, 50, 0.3)',
+                '&:hover': {
+                  boxShadow: '0 4px 12px rgba(46, 125, 50, 0.4)'
+                }
+              }}
               onClick={async () => {
                 try {
-                  console.log('[OptimizedViewChecks] Admin marking as reviewed:', selectedCheck.id);
+                  logger.log('[OptimizedViewChecks] Admin marking as reviewed:', selectedCheck.id);
                   await updateDoc(doc(db, 'checks', selectedCheck.id), { reviewed: true });
                   const qSnap = await getDocs(query(
                     collection(db, 'reviewRequest'),
@@ -3709,7 +4450,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                     where('weekKey', '==', selectedWeekKey),
                     where('createdBy', '==', selectedCheck.createdBy)
                   ));
-                  console.log('[OptimizedViewChecks] reviewRequest docs found:', qSnap.docs.map(d => ({ id: d.id, data: d.data() })));
+                  logger.log('[OptimizedViewChecks] reviewRequest docs found:', qSnap.docs.map(d => ({ id: d.id, data: d.data() })));
                   if (qSnap.docs.length === 0) {
                     // Create reviewRequest if not found
                     const newDoc = await addDoc(collection(db, 'reviewRequest'), {
@@ -3720,26 +4461,38 @@ const [userLoaded, setUserLoaded] = useState(false);
                       status: 'reviewed',
                       createdAt: serverTimestamp()
                     });
-                    console.log('[OptimizedViewChecks] Created new reviewRequest:', newDoc.id);
+                    logger.log('[OptimizedViewChecks] Created new reviewRequest:', newDoc.id);
                   } else {
                     await Promise.all(qSnap.docs.map(async d => {
                       await updateDoc(doc(db, 'reviewRequest', d.id), { reviewed: true, status: 'reviewed' });
                       const updated = (await getDoc(doc(db, 'reviewRequest', d.id))).data();
-                      console.log('[OptimizedViewChecks] reviewRequest after update:', d.id, updated);
+                      logger.log('[OptimizedViewChecks] reviewRequest after update:', d.id, updated);
                     }));
                   }
                   if (onReviewUpdated) {
-                    console.log('[OptimizedViewChecks] Calling onReviewUpdated after mark as reviewed');
+                    logger.log('[OptimizedViewChecks] Calling onReviewUpdated after mark as reviewed');
                     onReviewUpdated();
                   }
                   if (refetchChecks) {
-                    console.log('[OptimizedViewChecks] Calling refetchChecks after mark as reviewed');
+                    logger.log('[OptimizedViewChecks] Calling refetchChecks after mark as reviewed');
                     refetchChecks();
                   }
-                  handleCloseDialog();
+                  // Show success message
+                  setSnackbarMessage('✅ Check marked as reviewed successfully!');
+                  setSnackbarSeverity('success');
+                  setSnackbarOpen(true);
+                  // Close dialog and return to pending checks if opened from there
+                  setOpenDialog(false);
+                  setSelectedCheck(null);
+                  if (openedFromPendingChecks) {
+                    setOpenPendingChecksDialog(true);
+                    setOpenedFromPendingChecks(false);
+                  }
                 } catch (err) {
                   console.error('[OptimizedViewChecks] Error marking as reviewed:', err);
-                  alert('❌ Failed to mark as reviewed. Please try again.');
+                  setSnackbarMessage('❌ Failed to mark as reviewed. Please try again.');
+                  setSnackbarSeverity('error');
+                  setSnackbarOpen(true);
                 }
               }}
             >
@@ -3747,16 +4500,30 @@ const [userLoaded, setUserLoaded] = useState(false);
             </Button>
           )}
           {selectedCheck && selectedCheck.reviewed && currentRole === 'admin' && (
-            <Typography sx={{ mt: 2, color: 'green' }}>Already reviewed (admin)</Typography>
+            <Chip 
+              label="Already reviewed (admin)" 
+              color="success" 
+              sx={{ fontWeight: 600 }}
+            />
           )}
           {selectedCheck && !selectedCheck.reviewed && currentRole !== 'admin' && (
             <Button
               variant="outlined"
               color="primary"
-              sx={{ mt: 2 }}
+              sx={{ 
+                px: 3,
+                py: 1,
+                borderRadius: 2,
+                textTransform: 'none',
+                fontWeight: 600,
+                borderWidth: 2,
+                '&:hover': {
+                  borderWidth: 2
+                }
+              }}
               disabled={checksSentForReview.has(selectedCheck.id)}
               onClick={async () => {
-                console.log('[OptimizedViewChecks] User sending for review:', selectedCheck.id);
+                logger.log('[OptimizedViewChecks] User sending for review:', selectedCheck.id);
                 try {
                   await handleSendForReview(selectedCheck, selectedWeekKey!);
                 } catch (err) {
@@ -3772,19 +4539,29 @@ const [userLoaded, setUserLoaded] = useState(false);
             <Button
               variant="outlined"
               color="warning"
-              sx={{ mt: 2, ml: 2 }}
+              sx={{ 
+                px: 3,
+                py: 1,
+                borderRadius: 2,
+                textTransform: 'none',
+                fontWeight: 600,
+                borderWidth: 2,
+                '&:hover': {
+                  borderWidth: 2
+                }
+              }}
               onClick={async () => {
                 try {
-                  console.log('[OptimizedViewChecks] Undoing review (admin):', selectedCheck.id);
+                  logger.log('[OptimizedViewChecks] Undoing review (admin):', selectedCheck.id);
                   await updateDoc(doc(db, 'checks', selectedCheck.id), { reviewed: false });
-                  console.log('[OptimizedViewChecks] Check updated to reviewed: false');
+                  logger.log('[OptimizedViewChecks] Check updated to reviewed: false');
                   const qSnap = await getDocs(query(
                     collection(db, 'reviewRequest'),
                     where('companyId', '==', selectedCheck.companyId),
                     where('weekKey', '==', selectedWeekKey),
                     where('createdBy', '==', selectedCheck.createdBy)
                   ));
-                  console.log('[OptimizedViewChecks] reviewRequest docs found:', qSnap.docs.map(d => ({ id: d.id, data: d.data() })));
+                  logger.log('[OptimizedViewChecks] reviewRequest docs found:', qSnap.docs.map(d => ({ id: d.id, data: d.data() })));
                   if (qSnap.docs.length === 0) {
                     // Create reviewRequest if not found
                     const newDoc = await addDoc(collection(db, 'reviewRequest'), {
@@ -3795,20 +4572,20 @@ const [userLoaded, setUserLoaded] = useState(false);
                       status: 'pending',
                       createdAt: serverTimestamp()
                     });
-                    console.log('[OptimizedViewChecks] Created new reviewRequest:', newDoc.id);
+                    logger.log('[OptimizedViewChecks] Created new reviewRequest:', newDoc.id);
                   } else {
                     await Promise.all(qSnap.docs.map(async d => {
                       await updateDoc(doc(db, 'reviewRequest', d.id), { reviewed: false, status: 'pending' });
                       const updated = (await getDoc(doc(db, 'reviewRequest', d.id))).data();
-                      console.log('[OptimizedViewChecks] reviewRequest after update:', d.id, updated);
+                      logger.log('[OptimizedViewChecks] reviewRequest after update:', d.id, updated);
                     }));
                   }
                   if (onReviewUpdated) {
-                    console.log('[OptimizedViewChecks] Calling onReviewUpdated after undo');
+                    logger.log('[OptimizedViewChecks] Calling onReviewUpdated after undo');
                     onReviewUpdated();
                   }
                   if (refetchChecks) {
-                    console.log('[OptimizedViewChecks] Calling refetchChecks after undo review');
+                    logger.log('[OptimizedViewChecks] Calling refetchChecks after undo review');
                     refetchChecks();
                   }
                   handleCloseDialog();
@@ -3818,35 +4595,57 @@ const [userLoaded, setUserLoaded] = useState(false);
                 }
               }}
             >
-              Undo Review
+              UNDO REVIEW
             </Button>
           )}
           {selectedCheck && selectedCheck.paid && currentRole === 'admin' && (
             <Button
               variant="outlined"
               color="error"
-              sx={{ mt: 2, ml: 2 }}
+              sx={{ 
+                px: 3,
+                py: 1,
+                borderRadius: 2,
+                textTransform: 'none',
+                fontWeight: 600,
+                borderWidth: 2,
+                '&:hover': {
+                  borderWidth: 2
+                }
+              }}
               onClick={async () => {
                 try {
-                  console.log('[OptimizedViewChecks] Unmarking as paid (admin):', selectedCheck.id);
+                  logger.log('[OptimizedViewChecks] Unmarking as paid (admin):', selectedCheck.id);
                   await updateDoc(doc(db, 'checks', selectedCheck.id), { paid: false });
-                  console.log('[OptimizedViewChecks] Check updated to paid: false');
+                  logger.log('[OptimizedViewChecks] Check updated to paid: false');
                   if (onReviewUpdated) {
-                    console.log('[OptimizedViewChecks] Calling onReviewUpdated after unmark paid');
+                    logger.log('[OptimizedViewChecks] Calling onReviewUpdated after unmark paid');
                     onReviewUpdated();
                   }
                   if (refetchChecks) {
-                    console.log('[OptimizedViewChecks] Calling refetchChecks after unmark paid');
+                    logger.log('[OptimizedViewChecks] Calling refetchChecks after unmark paid');
                     refetchChecks();
                   }
-                  handleCloseDialog();
+                  // Show success message
+                  setSnackbarMessage('✅ Check unmarked as paid successfully!');
+                  setSnackbarSeverity('success');
+                  setSnackbarOpen(true);
+                  // Close dialog and return to pending checks if opened from there
+                  setOpenDialog(false);
+                  setSelectedCheck(null);
+                  if (openedFromPendingChecks) {
+                    setOpenPendingChecksDialog(true);
+                    setOpenedFromPendingChecks(false);
+                  }
                 } catch (err) {
                   console.error('[OptimizedViewChecks] Error unmarking as paid:', err);
-                  alert('❌ Failed to unmark as paid. Please try again.');
+                  setSnackbarMessage('❌ Failed to unmark as paid. Please try again.');
+                  setSnackbarSeverity('error');
+                  setSnackbarOpen(true);
                 }
               }}
             >
-               Unmark as Paid
+               Mark as Not Paid
             </Button>
           )}
           
@@ -3858,14 +4657,40 @@ const [userLoaded, setUserLoaded] = useState(false);
                 variant="contained"
                 color="error"
                 onClick={() => handleDeleteCheck(selectedCheck)}
-                sx={{ mr: 'auto' }}
+                sx={{ 
+                  mr: 'auto',
+                  px: 3,
+                  py: 1,
+                  borderRadius: 2,
+                  textTransform: 'none',
+                  fontWeight: 600,
+                  boxShadow: '0 2px 8px rgba(211, 47, 47, 0.3)',
+                  '&:hover': {
+                    boxShadow: '0 4px 12px rgba(211, 47, 47, 0.4)'
+                  }
+                }}
               >
-               Delete Check
+               DELETE CHECK
               </Button>
             )
           )}
           
-          <Button onClick={handleCloseDialog}>Close</Button>
+          <Button 
+            onClick={handleCloseDialog}
+            sx={{ 
+              px: 3,
+              py: 1,
+              borderRadius: 2,
+              textTransform: 'none',
+              fontWeight: 600,
+              color: '#757575',
+              '&:hover': {
+                backgroundColor: '#f5f5f5'
+              }
+            }}
+          >
+            CLOSE
+          </Button>
         </DialogActions>
       </Dialog>
 
@@ -3951,12 +4776,12 @@ const [userLoaded, setUserLoaded] = useState(false);
                                 <TableCell><strong>${(parseFloat(check.amount?.toString() || '0')).toFixed(2)}</strong></TableCell>
                                 <TableCell>{formatDateForDisplay(check.date)}</TableCell>
                                 <TableCell>
-                                  <Box sx={{ display: 'flex', gap: 1 }}>
-                                    <Chip label="⏳ Pending" color="warning" size="small" />
+                                    <Box sx={{ display: 'flex', gap: 1 }}>
+                                    <Chip label="Pending" color="warning" size="small" />
                                     {check.paid ? (
-                                      <Chip label="💰 Paid" color="success" size="small" />
+                                      <Chip label="Paid" color="success" size="small" />
                                     ) : (
-                                      <Chip label="💳 Unpaid" color="default" size="small" />
+                                      <Chip label="Unpaid" color="default" size="small" />
                                     )}
                                   </Box>
                                 </TableCell>
@@ -3969,10 +4794,11 @@ const [userLoaded, setUserLoaded] = useState(false);
                                       onClick={() => {
                                         setOpenPendingChecksDialog(false);
                                         setSelectedCheck(check);
+                                        setOpenedFromPendingChecks(true);
                                         setOpenDialog(true);
                                       }}
                                     >
-                                      🔎 Details
+                                      Details
                                     </Button>
                                     {currentRole === 'admin' && (
                                       <Button
@@ -3990,7 +4816,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                                           }
                                         }}
                                       >
-                                        ✅ Review
+                                        Review
                                       </Button>
                                     )}
                                     {!check.reviewed && currentRole !== 'admin' && (
@@ -4003,7 +4829,7 @@ const [userLoaded, setUserLoaded] = useState(false);
                                           handleSendForReview(check, 'global');
                                         }}
                                       >
-                                        {checksSentForReview.has(check.id) ? '✅ Sent' : '📤 Send for Review'}
+                                        {checksSentForReview.has(check.id) ? 'Sent' : 'Send for Review'}
         </Button>
       )}
                                   </Box>

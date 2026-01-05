@@ -45,6 +45,7 @@ import {
 
 import { db } from "../firebase";
 import { collection, addDoc, getDocs, updateDoc, doc } from "firebase/firestore";
+import { logger } from '../utils/logger';
 
 interface Client {
   id: string;
@@ -56,6 +57,8 @@ interface Client {
   contactPhone?: string;
   companyIds?: string[]; // ✅ store multiple company IDs
   active: boolean;
+  payPeriodStartDay?: 'monday' | 'sunday'; // Day the pay period starts
+  payPeriodFrequency?: 'weekly' | 'biweekly'; // How often they pay
 }
 
 interface Company {
@@ -91,6 +94,8 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
     contactEmail: "",
     contactPhone: "",
     companyIds: [] as string[],
+    payPeriodStartDay: 'monday' as 'monday' | 'sunday',
+    payPeriodFrequency: 'weekly' as 'weekly' | 'biweekly',
   });
 
   // Notification state
@@ -119,6 +124,8 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
         contactPhone: d.data().contactPhone,
         companyIds: d.data().companyId || d.data().companyIds || [],
         active: d.data().active ?? true,
+        payPeriodStartDay: d.data().payPeriodStartDay || 'monday',
+        payPeriodFrequency: d.data().payPeriodFrequency || 'weekly',
       }));
       setClients(clientList);
 
@@ -147,6 +154,8 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
         contactPhone: selectedClient.contactPhone || null,
         companyId: selectedClient.companyIds || [],
         division: selectedClient.division || null,
+        payPeriodStartDay: selectedClient.payPeriodStartDay || 'monday',
+        payPeriodFrequency: selectedClient.payPeriodFrequency || 'weekly',
       });
       
       // Update local state
@@ -166,7 +175,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
   };
 
   const handleToggleActive = async (clientId: string, active: boolean) => {
-    console.log('🔍 handleToggleActive called!', {
+    logger.log('🔍 handleToggleActive called!', {
       clientId,
       active,
       timestamp: new Date().toISOString()
@@ -174,12 +183,12 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
     
     try {
       await updateDoc(doc(db, "clients", clientId), { active });
-      console.log('✅ Database updated successfully');
+      logger.log('✅ Database updated successfully');
       
       setClients((prev) =>
         prev.map((c) => (c.id === clientId ? { ...c, active } : c))
       );
-      console.log('✅ State updated successfully');
+      logger.log('✅ State updated successfully');
     } catch (error) {
       console.error('❌ Error updating client status:', error);
     }
@@ -194,6 +203,8 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
       contactEmail: "",
       contactPhone: "",
       companyIds: [],
+      payPeriodStartDay: 'monday',
+      payPeriodFrequency: 'weekly',
     });
     setOpenForm(true);
   };
@@ -220,6 +231,8 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
       contactPhone: formData.contactPhone.trim() || null,
       companyId: formData.companyIds,
       active: true,
+      payPeriodStartDay: formData.payPeriodStartDay,
+      payPeriodFrequency: formData.payPeriodFrequency,
     };
 
     await addDoc(collection(db, "clients"), newClient);
@@ -237,6 +250,8 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
       contactPhone: d.data().contactPhone,
       companyIds: d.data().companyId || [],
       active: d.data().active ?? true,
+      payPeriodStartDay: d.data().payPeriodStartDay || 'monday',
+      payPeriodFrequency: d.data().payPeriodFrequency || 'weekly',
     }));
     setClients(clientList);
   };
@@ -256,19 +271,21 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
     return true; // Admin sees all
   });
 
-  const displayedClients = visibleClients
-    .filter((c) => {
-      // Apply company filter
-      if (selectedCompanyId !== "all") {
-        return c.companyIds && c.companyIds.includes(selectedCompanyId);
-      }
-      return true;
-    })
+  // Clients filtered by company (for statistics - no status filter)
+  const companyFilteredClients = visibleClients.filter((c) => {
+    // Apply company filter
+    if (selectedCompanyId !== "all") {
+      return c.companyIds && c.companyIds.includes(selectedCompanyId);
+    }
+    return true;
+  });
+
+  const displayedClients = companyFilteredClients
     .filter((c) => {
       // Apply status filter - only show active or inactive
       return filter === "Inactive" ? !c.active : c.active;
     })
-          .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+    .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 
   const getStatusColor = (active: boolean) => active ? 'success' : 'error';
   const getStatusIcon = (active: boolean) => active ? <CheckCircle /> : <Cancel />;
@@ -393,7 +410,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
           
           <Paper elevation={2} sx={{ p: 3, borderRadius: 3, textAlign: 'center', minWidth: 200, flex: 1 }}>
             <Typography variant="h4" fontWeight="bold" color="success.main">
-              {visibleClients.filter(c => c.active).length}
+              {companyFilteredClients.filter(c => c.active).length}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               Active Departments
@@ -401,7 +418,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
           </Paper>
           <Paper elevation={2} sx={{ p: 3, borderRadius: 3, textAlign: 'center', minWidth: 200, flex: 1 }}>
             <Typography variant="h4" fontWeight="bold" color="error.main">
-              {visibleClients.filter(c => !c.active).length}
+              {companyFilteredClients.filter(c => !c.active).length}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               Inactive Departments
@@ -409,7 +426,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
           </Paper>
           <Paper elevation={2} sx={{ p: 3, borderRadius: 3, textAlign: 'center', minWidth: 200, flex: 1 }}>
             <Typography variant="h4" fontWeight="bold" color="info.main">
-              {visibleClients.filter(c => c.companyIds && c.companyIds.length > 0).length}
+              {companyFilteredClients.filter(c => c.companyIds && c.companyIds.length > 0).length}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               Linked to Companies
@@ -570,7 +587,7 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
                 >
                   <Box 
                     onClick={(e) => {
-                      console.log('🔍 Box clicked - preventing propagation');
+                      logger.log('🔍 Box clicked - preventing propagation');
                       e.preventDefault();
                       e.stopPropagation();
                       (e.nativeEvent as Event).stopImmediatePropagation?.();
@@ -590,12 +607,12 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
                     <Switch
                       checked={client.active}
                       onClick={(e) => {
-                        console.log('🔍 Switch clicked - allowing default behavior');
+                        logger.log('🔍 Switch clicked - allowing default behavior');
                         e.stopPropagation();
                         (e.nativeEvent as Event).stopImmediatePropagation?.();
                       }}
                       onChange={(e) => {
-                        console.log('🔍 Switch onChange triggered!', {
+                        logger.log('🔍 Switch onChange triggered!', {
                           checked: e.target.checked,
                           clientId: client.id,
                           clientName: client.name,
@@ -757,6 +774,35 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
             type="tel"
           />
 
+          <Divider sx={{ my: 2 }} />
+          
+          <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1 }}>
+            Pay Period Configuration
+          </Typography>
+          
+          <FormControl fullWidth sx={{ mb: 2 }}>
+            <InputLabel>Pay Period Start Day</InputLabel>
+            <Select
+              value={formData.payPeriodStartDay}
+              onChange={(e) => handleChange("payPeriodStartDay", e.target.value)}
+              label="Pay Period Start Day"
+            >
+              <MenuItem value="monday">Monday (Monday-Sunday)</MenuItem>
+              <MenuItem value="sunday">Sunday (Sunday-Saturday)</MenuItem>
+            </Select>
+          </FormControl>
+
+          <FormControl fullWidth>
+            <InputLabel>Pay Frequency</InputLabel>
+            <Select
+              value={formData.payPeriodFrequency}
+              onChange={(e) => handleChange("payPeriodFrequency", e.target.value)}
+              label="Pay Frequency"
+            >
+              <MenuItem value="weekly">Weekly</MenuItem>
+              <MenuItem value="biweekly">Bi-Weekly (Every 2 weeks)</MenuItem>
+            </Select>
+          </FormControl>
           
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
@@ -844,6 +890,16 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
                     <Typography sx={{ mb: 1 }}>
                       Phone: {selectedClient.contactPhone || "N/A"}
                     </Typography>
+                    <Divider sx={{ my: 2 }} />
+                    <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1 }}>
+                      Pay Period Configuration
+                    </Typography>
+                    <Typography sx={{ mb: 1 }}>
+                      Start Day: {selectedClient.payPeriodStartDay === 'sunday' ? 'Sunday (Sunday-Saturday)' : 'Monday (Monday-Sunday)'}
+                    </Typography>
+                    <Typography sx={{ mb: 1 }}>
+                      Frequency: {selectedClient.payPeriodFrequency === 'biweekly' ? 'Bi-Weekly (Every 2 weeks)' : 'Weekly'}
+                    </Typography>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                       <Typography>Status:</Typography>
                       <Chip
@@ -898,6 +954,32 @@ const Clients: React.FC<ClientsProps> = ({ companyIds, currentRole, visibleClien
                       sx={{ mb: 2 }}
                       variant="outlined"
                     />
+                    <Divider sx={{ my: 2 }} />
+                    <Typography variant="subtitle2" fontWeight="bold" sx={{ mb: 1 }}>
+                      Pay Period Configuration
+                    </Typography>
+                    <FormControl fullWidth sx={{ mb: 2 }}>
+                      <InputLabel>Pay Period Start Day</InputLabel>
+                      <Select
+                        value={selectedClient.payPeriodStartDay || 'monday'}
+                        onChange={(e) => setSelectedClient({ ...selectedClient, payPeriodStartDay: e.target.value as 'monday' | 'sunday' })}
+                        label="Pay Period Start Day"
+                      >
+                        <MenuItem value="monday">Monday (Monday-Sunday)</MenuItem>
+                        <MenuItem value="sunday">Sunday (Sunday-Saturday)</MenuItem>
+                      </Select>
+                    </FormControl>
+                    <FormControl fullWidth sx={{ mb: 2 }}>
+                      <InputLabel>Pay Frequency</InputLabel>
+                      <Select
+                        value={selectedClient.payPeriodFrequency || 'weekly'}
+                        onChange={(e) => setSelectedClient({ ...selectedClient, payPeriodFrequency: e.target.value as 'weekly' | 'biweekly' })}
+                        label="Pay Frequency"
+                      >
+                        <MenuItem value="weekly">Weekly</MenuItem>
+                        <MenuItem value="biweekly">Bi-Weekly (Every 2 weeks)</MenuItem>
+                      </Select>
+                    </FormControl>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <Typography>Status:</Typography>
                       <Chip

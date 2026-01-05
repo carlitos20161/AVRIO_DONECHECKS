@@ -26,7 +26,11 @@ service cloud.firestore {
 
     // === CLIENTS ===
     match /clients/{clientId} {
-      allow read, write: if isAdmin();
+      // Allow admins to read/write all clients
+      // Allow authenticated users to read clients (frontend filters by visibleClientIds for security)
+      // Note: Firestore rules cannot filter list queries, so we rely on frontend filtering
+      allow read: if isAdmin() || isAuthenticated();
+      allow write: if isAdmin();
     }
 
     // === BANKS ===

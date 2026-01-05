@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -30,10 +30,11 @@ import {
   DialogActions,
   Chip
 } from '@mui/material';
-import { Download, FilterList, Refresh, ExpandMore, Business, AttachMoney, People, Launch, FileDownload, AssignmentInd } from '@mui/icons-material';
+import { Download, FilterList, Refresh, ExpandMore, Business, AttachMoney, People, Launch, FileDownload, AssignmentInd, Receipt } from '@mui/icons-material';
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 import { db } from '../firebase';
 import ExcelJS from 'exceljs';
+import { logger } from '../utils/logger';
 
 interface Company {
   id: string;
@@ -58,6 +59,8 @@ interface Employee {
   payType?: string;
   position?: string;
   role?: string;
+  address?: string;
+  startDate?: string;
   clientPayTypeRelationships?: Array<{
     id: string;
     clientId: string;
@@ -103,6 +106,9 @@ interface Check {
   paid: boolean;
   reviewed: boolean;
   createdBy: string;
+  isExpense?: boolean;
+  expenseName?: string;
+  expenseDescription?: string;
   relationshipDetails?: Array<{
     id: string;
     clientId: string;
@@ -145,7 +151,19 @@ interface DivisionBreakdown {
   totalAmount: number;
   hourlyAmount: number;
   perdiemAmount: number;
+  ptoAmount: number;
+  otherPayAmount: number;
+  expensesAmount: number;
   checks: Check[];
+}
+
+type RelationshipDetail = NonNullable<Check["relationshipDetails"]>[number];
+
+interface DivisionMapEntry {
+  divisionName: string;
+  checks: Check[];
+  clients: Set<string>;
+  relationshipsByCheck: Map<string, RelationshipDetail[]>;
 }
 
 interface ClientBreakdown {
@@ -155,8 +173,25 @@ interface ClientBreakdown {
   totalAmount: number;
   hourlyAmount: number;
   perdiemAmount: number;
+  ptoAmount: number;
+  otherPayAmount: number;
+  expensesAmount: number;
   divisionBreakdown: DivisionBreakdown[];
   checks: Check[];
+}
+
+interface ClientDepartmentStats {
+  clientId: string;
+  clientName: string;
+  companyName: string;
+  totalChecks: number;
+  hourlyAmount: number;
+  perdiemAmount: number;
+  ptoAmount: number;
+  otherPayAmount: number;
+  expensesAmount: number;
+  totalAmount: number;
+  isActive: boolean;
 }
 
 interface CompanyReport {
@@ -186,6 +221,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
   const [selectedCompanyForEmployees, setSelectedCompanyForEmployees] = useState<string>('all');
   const [selectedCompanyForEmployeeInfo, setSelectedCompanyForEmployeeInfo] = useState<string>('all');
   const [includeInactiveEmployees, setIncludeInactiveEmployees] = useState<boolean>(false);
+  const [employeeSearchTerm, setEmployeeSearchTerm] = useState<string>('');
   const [selectedEmployees, setSelectedEmployees] = useState<Set<string>>(new Set());
   const [expandedCompany, setExpandedCompany] = useState<string | null>(null);
   const [divisionChecksDialog, setDivisionChecksDialog] = useState<{
@@ -225,16 +261,13 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
       return employee.companyId === selectedCompanyForEmployees;
     });
     
-    const employeesWithChecks = filteredEmployees.filter(employee => 
-      filteredChecks.some(check => check.employeeId === employee.id)
-    );
-    
-    if (selectedEmployees.size === employeesWithChecks.length) {
+    // Use all filtered employees, not just those with checks
+    if (selectedEmployees.size === filteredEmployees.length) {
       // All selected, deselect all
       setSelectedEmployees(new Set());
     } else {
       // Select all
-      setSelectedEmployees(new Set(employeesWithChecks.map(emp => emp.id)));
+      setSelectedEmployees(new Set(filteredEmployees.map(emp => emp.id)));
     }
   };
 
@@ -256,18 +289,93 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
     });
   };
 
+  // Helper function to calculate adaptive column width based on content (ultra tight fit)
+  const calculateColumnWidth = (worksheet: ExcelJS.Worksheet, colNumber: number): number => {
+    let maxLength = 0;
+    
+    // Check header
+    const headerCell = worksheet.getRow(1).getCell(colNumber);
+    if (headerCell.value !== null && headerCell.value !== undefined) {
+      const headerLength = String(headerCell.value).length;
+      maxLength = Math.max(maxLength, headerLength);
+    }
+    
+    // Check all data rows - check all rows for most accurate sizing
+    if (worksheet.rowCount > 1) {
+      for (let rowNum = 2; rowNum <= worksheet.rowCount; rowNum++) {
+        const cell = worksheet.getRow(rowNum).getCell(colNumber);
+        if (cell.value !== null && cell.value !== undefined) {
+          const cellValue = String(cell.value);
+          // Ultra minimal padding - content fit only
+          const isNumber = typeof cell.value === 'number';
+          const isDate = cellValue.match(/\d{1,2}\/\d{1,2}\/\d{4}/);
+          // For numbers, use actual formatted length (no extra padding)
+          // For dates and text, use exact length
+          const length = isNumber 
+            ? cellValue.length + 0.5  // Tiny padding for numbers only
+            : cellValue.length; // Exact length for text
+          maxLength = Math.max(maxLength, length);
+        }
+      }
+    }
+    
+    // Return ultra tight width - exact content fit (min 5, max 40)
+    // Excel column width is in character units, add minimal padding (0.5) for readability
+    return Math.min(Math.max(maxLength + 0.5, 5), 40);
+  };
+
+  // Helper function to calculate adaptive row height based on content (very tight fit)
+  const calculateRowHeight = (row: ExcelJS.Row): number => {
+    let maxContentLength = 0;
+    let cellCount = 0;
+    
+    row.eachCell((cell) => {
+      if (cell.value !== null && cell.value !== undefined) {
+        const cellValue = String(cell.value);
+        maxContentLength = Math.max(maxContentLength, cellValue.length);
+        cellCount++;
+      }
+    });
+    
+    // If no content, return minimum height
+    if (cellCount === 0) {
+      return 12;
+    }
+    
+    // Very tight height calculation - base 12 for single line content
+    // Only increase if content is very long (more than 50 chars)
+    if (maxContentLength <= 50) {
+      return 12; // Single line content - very tight
+    } else if (maxContentLength <= 100) {
+      return 15; // Slightly longer content
+    } else {
+      // For very long content, estimate lines (assuming ~50 chars per line)
+      const estimatedLines = Math.ceil(maxContentLength / 50);
+      return Math.min(12 + (estimatedLines - 1) * 10, 30); // Max 30 to prevent excessive height
+    }
+  };
+
   // Helper function to apply professional styling to ExcelJS worksheet
   const applyProfessionalStyling = (worksheet: ExcelJS.Worksheet, hasTotal: boolean = false) => {
-    // Style header row
-    worksheet.getRow(1).height = 29;
-    worksheet.getRow(1).eachCell((cell) => {
-      cell.font = { bold: true, color: { argb: 'FF000000' } };
+    // Auto-size all columns based on content
+    const columnCount = worksheet.columnCount;
+    for (let colNum = 1; colNum <= columnCount; colNum++) {
+      const calculatedWidth = calculateColumnWidth(worksheet, colNum);
+      worksheet.getColumn(colNum).width = calculatedWidth;
+    }
+
+    // Style header row (very compact)
+    const headerRow = worksheet.getRow(1);
+    const headerHeight = calculateRowHeight(headerRow);
+    headerRow.height = Math.max(headerHeight, 15); // Minimum 15 for header (very tight)
+    headerRow.eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: 'FF000000' }, size: 9 }; // Smaller font for tighter fit
       cell.fill = {
         type: 'pattern',
         pattern: 'solid',
-        fgColor: { argb: 'FFADD8E6' } // Light blue
+        fgColor: { argb: 'FFFFFFFF' } // White background
       };
-      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: false, shrinkToFit: false };
       cell.border = {
         top: { style: 'thin', color: { argb: 'FF000000' } },
         left: { style: 'thin', color: { argb: 'FF000000' } },
@@ -276,48 +384,45 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
       };
     });
 
-    // Style data rows
+    // Style data rows with very tight adaptive heights
     const rowCount = worksheet.rowCount;
     for (let rowNum = 2; rowNum <= rowCount; rowNum++) {
       const row = worksheet.getRow(rowNum);
-      row.height = 20;
+      const calculatedHeight = calculateRowHeight(row);
+      row.height = calculatedHeight; // Use calculated height directly (very tight)
       
       // Check if this is the total row (last row if hasTotal is true)
       const isTotalRow = hasTotal && rowNum === rowCount;
-      const isEvenRow = rowNum % 2 === 0;
       
       row.eachCell((cell, colNumber) => {
-        // Background color
-        if (isTotalRow) {
-          cell.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: 'FFFFCC99' } // Light orange for total row
-          };
-          cell.font = { bold: true, color: { argb: 'FF000000' } };
-        } else {
-          cell.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: isEvenRow ? 'FFFFFFFF' : 'FFD3D3D3' }
-          };
-          cell.font = { color: { argb: 'FF000000' } };
-        }
-        
-        // Alignment: numbers right-aligned, text left-aligned
-        const cellValue = cell.value;
-        const isNumber = typeof cellValue === 'number';
-        cell.alignment = { 
-          horizontal: isNumber ? 'right' : 'left',
-          vertical: 'middle'
+        // White background for all cells
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFFFFFF' } // White
         };
         
-        // Borders
+        // Bold font for total row, regular for others (very small font for maximum compactness)
+        if (isTotalRow) {
+          cell.font = { bold: true, color: { argb: 'FF000000' }, size: 9 };
+        } else {
+          cell.font = { color: { argb: 'FF000000' }, size: 9 }; // Very small font
+        }
+        
+        // Center all cell contents, no wrapping for tightest fit
+        cell.alignment = { 
+          horizontal: 'center',
+          vertical: 'middle',
+          wrapText: false,
+          shrinkToFit: false
+        };
+        
+        // Black borders
         cell.border = {
-          top: { style: 'thin', color: { argb: 'FF808080' } },
-          left: { style: 'thin', color: { argb: 'FF808080' } },
-          bottom: { style: 'thin', color: { argb: 'FF808080' } },
-          right: { style: 'thin', color: { argb: 'FF808080' } }
+          top: { style: 'thin', color: { argb: 'FF000000' } },
+          left: { style: 'thin', color: { argb: 'FF000000' } },
+          bottom: { style: 'thin', color: { argb: 'FF000000' } },
+          right: { style: 'thin', color: { argb: 'FF000000' } }
         };
       });
     }
@@ -346,7 +451,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         { header: 'Pay Rate', key: 'payRate', width: 10 },
         { header: 'Overtime Hours', key: 'overtimeHours', width: 14 },
         { header: 'Overtime Rate', key: 'overtimeRate', width: 13 },
-        { header: 'Holiday Hours', key: 'holidayHours', width: 13 },
+        { header: 'PTO Hours', key: 'holidayHours', width: 13 },
         { header: 'Holiday Rate', key: 'holidayRate', width: 12 },
         { header: 'Per Diem Amount', key: 'perDiemAmount', width: 15 },
         { header: 'Per Diem Breakdown', key: 'perDiemBreakdown', width: 18 },
@@ -364,7 +469,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         cell.fill = {
           type: 'pattern',
           pattern: 'solid',
-          fgColor: { argb: 'FFADD8E6' } // Light blue
+          fgColor: { argb: 'FFFFFFFF' } // White background
         };
         cell.alignment = { horizontal: 'center', vertical: 'middle' };
         cell.border = {
@@ -452,36 +557,30 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         // Set row height
         row.height = 20;
         
-        // Apply alternating row colors and styling
-        const isEvenRow = (index + 2) % 2 === 0; // +2 because header is row 1, data starts at row 2
-        
+        // Apply styling - white background, black borders, centered content
         row.eachCell((cell, colNumber) => {
-          // Background color: white for even rows, light gray for odd rows
+          // White background
           cell.fill = {
             type: 'pattern',
             pattern: 'solid',
-            fgColor: { argb: isEvenRow ? 'FFFFFFFF' : 'FFD3D3D3' }
+            fgColor: { argb: 'FFFFFFFF' } // White
           };
           
           // Text color
           cell.font = { color: { argb: 'FF000000' } };
           
-          // Alignment: left for text, right for numbers/dates
-          // Number columns: Check Number(1), Hours Worked(8), Pay Rate(9), Overtime Hours(10), Overtime Rate(11), 
-          // Holiday Hours(12), Holiday Rate(13), Per Diem Amount(14), Hourly Total(16), Total Amount(17)
-          const numberColumns = [1, 8, 9, 10, 11, 12, 13, 14, 16, 17];
-          const isNumberColumn = numberColumns.includes(colNumber);
+          // Center all cell contents
           cell.alignment = { 
-            horizontal: isNumberColumn ? 'right' : 'left',
+            horizontal: 'center',
             vertical: 'middle'
           };
           
-          // Borders
+          // Black borders
           cell.border = {
-            top: { style: 'thin', color: { argb: 'FF808080' } },
-            left: { style: 'thin', color: { argb: 'FF808080' } },
-            bottom: { style: 'thin', color: { argb: 'FF808080' } },
-            right: { style: 'thin', color: { argb: 'FF808080' } }
+            top: { style: 'thin', color: { argb: 'FF000000' } },
+            left: { style: 'thin', color: { argb: 'FF000000' } },
+            bottom: { style: 'thin', color: { argb: 'FF000000' } },
+            right: { style: 'thin', color: { argb: 'FF000000' } }
           };
         });
       });
@@ -505,7 +604,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         cell.fill = {
           type: 'pattern',
           pattern: 'solid',
-          fgColor: { argb: 'FFADD8E6' }
+          fgColor: { argb: 'FFFFFFFF' } // White background
         };
         cell.alignment = { horizontal: 'center', vertical: 'middle' };
         cell.border = {
@@ -531,19 +630,20 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         cell.fill = {
           type: 'pattern',
           pattern: 'solid',
-          fgColor: { argb: 'FFFFFFFF' }
+          fgColor: { argb: 'FFFFFFFF' } // White background
         };
         cell.font = { color: { argb: 'FF000000' } };
-        const isNumberColumn = colNumber >= 3; // Total Checks, Total Amount, etc.
+        // Center all cell contents
         cell.alignment = { 
-          horizontal: isNumberColumn ? 'right' : 'left',
+          horizontal: 'center',
           vertical: 'middle'
         };
+        // Black borders
         cell.border = {
-          top: { style: 'thin', color: { argb: 'FF808080' } },
-          left: { style: 'thin', color: { argb: 'FF808080' } },
-          bottom: { style: 'thin', color: { argb: 'FF808080' } },
-          right: { style: 'thin', color: { argb: 'FF808080' } }
+          top: { style: 'thin', color: { argb: 'FF000000' } },
+          left: { style: 'thin', color: { argb: 'FF000000' } },
+          bottom: { style: 'thin', color: { argb: 'FF000000' } },
+          right: { style: 'thin', color: { argb: 'FF000000' } }
         };
       });
 
@@ -576,6 +676,71 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
     setSelectedEmployees(new Set());
   }, [selectedCompanyForEmployees]);
 
+  // Use refs to prevent circular updates
+  const syncingFromTopFilter = useRef(false);
+  const syncingFromEmployeeSummary = useRef(false);
+  const syncingFromEmployeeInfo = useRef(false);
+
+  // Sync top Company filter DOWN to Employee Summary dropdown when Employee Summary tab is active
+  useEffect(() => {
+    if (selectedTab === 2 && !syncingFromEmployeeSummary.current) {
+      const newValue = filters.companyId || 'all';
+      if (selectedCompanyForEmployees !== newValue) {
+        syncingFromTopFilter.current = true;
+        setSelectedCompanyForEmployees(newValue);
+        // Reset flag after state update
+        requestAnimationFrame(() => {
+          syncingFromTopFilter.current = false;
+        });
+      }
+    }
+  }, [filters.companyId, selectedTab]);
+
+  // Sync top Company filter DOWN to Employee Info Report dropdown when Employee Info Report tab is active
+  useEffect(() => {
+    if (selectedTab === 3 && !syncingFromEmployeeInfo.current) {
+      const newValue = filters.companyId || 'all';
+      if (selectedCompanyForEmployeeInfo !== newValue) {
+        syncingFromTopFilter.current = true;
+        setSelectedCompanyForEmployeeInfo(newValue);
+        // Reset flag after state update
+        requestAnimationFrame(() => {
+          syncingFromTopFilter.current = false;
+        });
+      }
+    }
+  }, [filters.companyId, selectedTab]);
+
+  // Sync Employee Summary dropdown UP to top Company filter when Employee Summary tab is active
+  useEffect(() => {
+    if (selectedTab === 2 && !syncingFromTopFilter.current) {
+      const newCompanyId = selectedCompanyForEmployees === 'all' ? undefined : selectedCompanyForEmployees;
+      if (filters.companyId !== newCompanyId) {
+        syncingFromEmployeeSummary.current = true;
+        setFilters(prev => ({ ...prev, companyId: newCompanyId }));
+        // Reset flag after state update
+        requestAnimationFrame(() => {
+          syncingFromEmployeeSummary.current = false;
+        });
+      }
+    }
+  }, [selectedCompanyForEmployees, selectedTab]);
+
+  // Sync Employee Info Report dropdown UP to top Company filter when Employee Info Report tab is active
+  useEffect(() => {
+    if (selectedTab === 3 && !syncingFromTopFilter.current) {
+      const newCompanyId = selectedCompanyForEmployeeInfo === 'all' ? undefined : selectedCompanyForEmployeeInfo;
+      if (filters.companyId !== newCompanyId) {
+        syncingFromEmployeeInfo.current = true;
+        setFilters(prev => ({ ...prev, companyId: newCompanyId }));
+        // Reset flag after state update
+        requestAnimationFrame(() => {
+          syncingFromEmployeeInfo.current = false;
+        });
+      }
+    }
+  }, [selectedCompanyForEmployeeInfo, selectedTab]);
+
   const fetchData = async () => {
     setLoading(true);
     setError(null);
@@ -599,7 +764,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
       // 🔒 SECURITY: Filter clients by visibleClientIds (only show clients user has access to)
       if (currentRole !== 'admin' && visibleClientIds.length > 0) {
         clientsData = clientsData.filter(client => visibleClientIds.includes(client.id));
-        console.log('🔒 [Report Security] Filtered clients by visibleClientIds:', {
+        logger.log('🔒 [Report Security] Filtered clients by visibleClientIds:', {
           originalCount: clientsSnap.docs.length,
           filteredCount: clientsData.length,
           visibleClientIds
@@ -635,6 +800,32 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
     }
   };
 
+  const getDivisionNameForRelationship = (check: Check, relationship?: RelationshipDetail): string => {
+    // Check if this is an expense check first
+    const isExpenseCheck = check.isExpense || check.payType === 'expense';
+    
+    if (isExpenseCheck) {
+      return 'Expenses';
+    }
+
+    let divisionName = 'No Division';
+
+    const hasContainer = check.relationshipDetails?.some(rel => rel.clientName === 'Container');
+    const hasProjects = check.relationshipDetails?.some(rel => rel.clientName === 'Projects');
+
+    if (hasContainer && hasProjects) {
+      divisionName = 'Container';
+    } else if (relationship?.division) {
+      divisionName = relationship.division;
+    } else {
+      const clientId = relationship?.clientId || check.clientId;
+      const client = clients.find(c => c.id === clientId);
+      divisionName = client?.division || 'No Division';
+    }
+
+    return divisionName;
+  };
+
   const getFilteredData = () => {
     let filteredChecks = checks;
 
@@ -659,7 +850,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         }
         return false;
       });
-      console.log('🔒 [Report Security] Filtered checks by visibleClientIds:', {
+      logger.log('🔒 [Report Security] Filtered checks by visibleClientIds:', {
         originalCount: checks.length,
         filteredCount: filteredChecks.length,
         visibleClientIds
@@ -699,14 +890,14 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
     const filteredChecks = getFilteredData();
     const companyReports: CompanyReport[] = [];
 
-    console.log('🔍 [Report] ========== STARTING REPORT GENERATION ==========');
-    console.log('🔍 [Report] Total filtered checks:', filteredChecks.length);
-    console.log('🔍 [Report] Available companies:', companies.map(c => ({ id: c.id, name: c.name })));
-    console.log('🔍 [Report] Available clients:', clients.map(c => ({ id: c.id, name: c.name, division: c.division })));
+    logger.log('🔍 [Report] ========== STARTING REPORT GENERATION ==========');
+    logger.log('🔍 [Report] Total filtered checks:', filteredChecks.length);
+    logger.log('🔍 [Report] Available companies:', companies.map(c => ({ id: c.id, name: c.name })));
+    logger.log('🔍 [Report] Available clients:', clients.map(c => ({ id: c.id, name: c.name, division: c.division })));
     
     // Log sample check data
     if (filteredChecks.length > 0) {
-      console.log('🔍 [Report] Sample check data:', {
+      logger.log('🔍 [Report] Sample check data:', {
         checkId: filteredChecks[0].id,
         amount: filteredChecks[0].amount,
         companyId: filteredChecks[0].companyId,
@@ -723,13 +914,13 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
     companies.forEach(company => {
       const companyChecks = filteredChecks.filter(check => check.companyId === company.id);
       
-      console.log(`🔍 [Report] ========== PROCESSING COMPANY: ${company.name} ==========`);
-      console.log(`🔍 [Report] Company ID: ${company.id}`);
-      console.log(`🔍 [Report] Company checks count: ${companyChecks.length}`);
+      logger.log(`🔍 [Report] ========== PROCESSING COMPANY: ${company.name} ==========`);
+      logger.log(`🔍 [Report] Company ID: ${company.id}`);
+      logger.log(`🔍 [Report] Company checks count: ${companyChecks.length}`);
       
       // Log all checks for this company
       companyChecks.forEach((check, index) => {
-        console.log(`🔍 [Report] Company ${company.name} - Check ${index + 1}:`, {
+        logger.log(`🔍 [Report] Company ${company.name} - Check ${index + 1}:`, {
           checkId: check.id,
           checkNumber: check.checkNumber,
           amount: check.amount,
@@ -745,77 +936,54 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
       });
       
       if (companyChecks.length === 0) {
-        console.log(`🔍 [Report] No checks found for company ${company.name}, skipping...`);
+        logger.log(`🔍 [Report] No checks found for company ${company.name}, skipping...`);
         return;
       }
 
-      const totalAmount = companyChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
+      const companyTotalAmount = companyChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
       
       // Group by division across all clients in the company
-      const divisionMap = new Map<string, { divisionName: string; checks: Check[]; clients: Set<string> }>();
+      const divisionMap = new Map<string, DivisionMapEntry>();
       
-      console.log(`🔍 [Report] ========== STARTING DIVISION GROUPING FOR ${company.name} ==========`);
+      logger.log(`🔍 [Report] ========== STARTING DIVISION GROUPING FOR ${company.name} ==========`);
       
       companyChecks.forEach((check, checkIndex) => {
-        console.log(`🔍 [Report] ========== PROCESSING CHECK ${checkIndex + 1}/${companyChecks.length} ==========`);
-        console.log(`🔍 [Report] Check ID: ${check.id}`);
-        console.log(`🔍 [Report] Check Number: ${check.checkNumber}`);
-        console.log(`🔍 [Report] Employee: ${check.employeeId || 'Unknown Employee'}`);
-        console.log(`🔍 [Report] Amount: ${check.amount}`);
-        console.log(`🔍 [Report] Has relationshipDetails: ${!!check.relationshipDetails}`);
-        console.log(`🔍 [Report] RelationshipDetails count: ${check.relationshipDetails?.length || 0}`);
+        logger.log(`🔍 [Report] ========== PROCESSING CHECK ${checkIndex + 1}/${companyChecks.length} ==========`);
+        logger.log(`🔍 [Report] Check ID: ${check.id}`);
+        logger.log(`🔍 [Report] Check Number: ${check.checkNumber}`);
+        logger.log(`🔍 [Report] Employee: ${check.employeeId || 'Unknown Employee'}`);
+        logger.log(`🔍 [Report] Amount: ${check.amount}`);
+        logger.log(`🔍 [Report] Has relationshipDetails: ${!!check.relationshipDetails}`);
+        logger.log(`🔍 [Report] RelationshipDetails count: ${check.relationshipDetails?.length || 0}`);
         // For each check, group by division name regardless of client
         if (check.relationshipDetails && check.relationshipDetails.length > 0) {
-          console.log(`🔍 [Report] Processing ${check.relationshipDetails?.length || 0} relationships for check ${check.id}`);
+          logger.log(`🔍 [Report] Processing ${check.relationshipDetails?.length || 0} relationships for check ${check.id}`);
           
           // Process each relationship and group by division
           check.relationshipDetails.forEach((rel, relIndex) => {
-            console.log(`🔍 [Report] ========== RELATIONSHIP ${relIndex + 1}/${check.relationshipDetails?.length || 0} ==========`);
-            console.log(`🔍 [Report] Relationship ID: ${rel.id}`);
-            console.log(`🔍 [Report] Client ID: ${rel.clientId}`);
-            console.log(`🔍 [Report] Client Name: ${rel.clientName}`);
-            console.log(`🔍 [Report] Pay Type: ${rel.payType}`);
-            console.log(`🔍 [Report] Division: ${rel.division || 'NO DIVISION'}`);
-            console.log(`🔍 [Report] Pay Rate: ${rel.payRate || 'NO PAY RATE'}`);
-            console.log(`🔍 [Report] Hours: ${rel.hours || 'NO HOURS'}`);
-            console.log(`🔍 [Report] OT Hours: ${rel.otHours || 'NO OT HOURS'}`);
-            console.log(`🔍 [Report] Holiday Hours: ${rel.holidayHours || 'NO HOLIDAY HOURS'}`);
-            console.log(`🔍 [Report] Other Pay: ${rel.otherPay ? JSON.stringify(rel.otherPay) : 'NO OTHER PAY'}`);
-            console.log(`🔍 [Report] Per Diem Amount: ${rel.perdiemAmount || 'NO PER DIEM AMOUNT'}`);
+            logger.log(`🔍 [Report] ========== RELATIONSHIP ${relIndex + 1}/${check.relationshipDetails?.length || 0} ==========`);
+            logger.log(`🔍 [Report] Relationship ID: ${rel.id}`);
+            logger.log(`🔍 [Report] Client ID: ${rel.clientId}`);
+            logger.log(`🔍 [Report] Client Name: ${rel.clientName}`);
+            logger.log(`🔍 [Report] Pay Type: ${rel.payType}`);
+            logger.log(`🔍 [Report] Division: ${rel.division || 'NO DIVISION'}`);
+            logger.log(`🔍 [Report] Pay Rate: ${rel.payRate || 'NO PAY RATE'}`);
+            logger.log(`🔍 [Report] Hours: ${rel.hours || 'NO HOURS'}`);
+            logger.log(`🔍 [Report] OT Hours: ${rel.otHours || 'NO OT HOURS'}`);
+            logger.log(`🔍 [Report] Holiday Hours: ${rel.holidayHours || 'NO HOLIDAY HOURS'}`);
+            logger.log(`🔍 [Report] Other Pay: ${rel.otherPay ? JSON.stringify(rel.otherPay) : 'NO OTHER PAY'}`);
+            logger.log(`🔍 [Report] Per Diem Amount: ${rel.perdiemAmount || 'NO PER DIEM AMOUNT'}`);
             
-            let divisionName = 'No Division';
+            const divisionName = getDivisionNameForRelationship(check, rel);
             
-            // Check if this is a mixed check (Container + Projects)
-            const hasContainer = check.relationshipDetails?.some(r => r.clientName === 'Container');
-            const hasProjects = check.relationshipDetails?.some(r => r.clientName === 'Projects');
-            
-            console.log(`🔍 [Report] Mixed check analysis:`, {
-              hasContainer,
-              hasProjects,
-              isMixed: hasContainer && hasProjects
+            logger.log(`🔍 [Report] Division assignment details:`, {
+              clientName: rel.clientName,
+              divisionName,
+              hasContainer: check.relationshipDetails?.some(r => r.clientName === 'Container'),
+              hasProjects: check.relationshipDetails?.some(r => r.clientName === 'Projects')
             });
             
-            if (hasContainer && hasProjects) {
-              // Mixed check - prioritize Container (as per user requirement)
-              divisionName = 'Container';
-              console.log(`🔍 [Report] Mixed check detected - assigning to Container division`);
-            } else if (rel.division) {
-              // Use relationship division
-              divisionName = rel.division;
-              console.log(`🔍 [Report] Using relationship division: ${divisionName}`);
-            } else {
-              // Fallback to client's division
-              const client = clients.find(c => c.id === rel.clientId);
-              divisionName = client?.division || 'No Division';
-              console.log(`🔍 [Report] Fallback to client division:`, {
-                clientFound: !!client,
-                clientName: client?.name,
-                clientDivision: client?.division,
-                finalDivision: divisionName
-              });
-            }
-            
-            console.log(`🔍 [Report] FINAL DIVISION ASSIGNMENT:`, {
+            logger.log(`🔍 [Report] FINAL DIVISION ASSIGNMENT:`, {
               clientName: rel.clientName,
               divisionName,
               payType: rel.payType,
@@ -823,17 +991,21 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
             });
             
             if (!divisionMap.has(divisionName)) {
-              console.log(`🔍 [Report] Creating new division map entry for: ${divisionName}`);
-              divisionMap.set(divisionName, { divisionName, checks: [], clients: new Set() });
+              logger.log(`🔍 [Report] Creating new division map entry for: ${divisionName}`);
+              divisionMap.set(divisionName, { divisionName, checks: [], clients: new Set(), relationshipsByCheck: new Map() });
             } else {
-              console.log(`🔍 [Report] Adding to existing division map entry for: ${divisionName}`);
+              logger.log(`🔍 [Report] Adding to existing division map entry for: ${divisionName}`);
             }
             
             const divisionEntry = divisionMap.get(divisionName)!;
-            divisionEntry.checks.push(check);
-            divisionEntry.clients.add(rel.clientName);
+            if (!divisionEntry.relationshipsByCheck.has(check.id)) {
+              divisionEntry.relationshipsByCheck.set(check.id, []);
+              divisionEntry.checks.push(check);
+            }
+            divisionEntry.relationshipsByCheck.get(check.id)!.push(rel);
+            divisionEntry.clients.add(rel.clientName || 'Unknown Client');
             
-            console.log(`🔍 [Report] Division map updated for ${divisionName}:`, {
+            logger.log(`🔍 [Report] Division map updated for ${divisionName}:`, {
               checkCount: divisionEntry.checks.length,
               clients: Array.from(divisionEntry.clients)
             });
@@ -842,9 +1014,9 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
           // Single client check - group by client's division
           const client = clients.find(c => c.id === check.clientId);
           const clientName = client?.name || 'Unknown Client';
-          const divisionName = client?.division || 'No Division';
+          const divisionName = getDivisionNameForRelationship(check);
           
-          console.log(`🔍 [Report] Single client check processing:`, {
+          logger.log(`🔍 [Report] Single client check processing:`, {
             checkId: check.id,
             clientId: check.clientId,
             clientName,
@@ -853,60 +1025,67 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
           });
           
           if (!divisionMap.has(divisionName)) {
-            console.log(`🔍 [Report] Creating new division map entry for single client: ${divisionName}`);
-            divisionMap.set(divisionName, { divisionName, checks: [], clients: new Set() });
+            logger.log(`🔍 [Report] Creating new division map entry for single client: ${divisionName}`);
+            divisionMap.set(divisionName, { divisionName, checks: [], clients: new Set(), relationshipsByCheck: new Map() });
           }
           
           const divisionEntry = divisionMap.get(divisionName)!;
-          divisionEntry.checks.push(check);
+          if (!divisionEntry.relationshipsByCheck.has(check.id)) {
+            divisionEntry.relationshipsByCheck.set(check.id, []);
+            divisionEntry.checks.push(check);
+          }
           divisionEntry.clients.add(clientName);
           
-          console.log(`🔍 [Report] Single client division map updated for ${divisionName}:`, {
+          logger.log(`🔍 [Report] Single client division map updated for ${divisionName}:`, {
             checkCount: divisionEntry.checks.length,
             clients: Array.from(divisionEntry.clients)
           });
         }
       });
       
-      console.log(`🔍 [Report] ========== FINAL DIVISION MAP FOR ${company.name} ==========`);
+      logger.log(`🔍 [Report] ========== FINAL DIVISION MAP FOR ${company.name} ==========`);
       divisionMap.forEach((entry, divisionName) => {
-        console.log(`🔍 [Report] Division: ${divisionName}`, {
+        logger.log(`🔍 [Report] Division: ${divisionName}`, {
           checkCount: entry.checks.length,
-          clients: Array.from(entry.clients),
-          totalAmount: entry.checks.reduce((sum, c) => sum + (c.amount || 0), 0)
+          clients: Array.from(entry.clients)
         });
       });
 
       // Create division breakdown directly from the division map
-      console.log(`🔍 [Report] ========== STARTING DIVISION BREAKDOWN CALCULATION ==========`);
+      logger.log(`🔍 [Report] ========== STARTING DIVISION BREAKDOWN CALCULATION ==========`);
       
       const divisionBreakdown: DivisionBreakdown[] = Array.from(divisionMap.values()).map(({ divisionName, checks, clients }, divIndex) => {
-        console.log(`🔍 [Report] ========== CALCULATING DIVISION ${divIndex + 1}/${divisionMap.size}: ${divisionName} ==========`);
+        logger.log(`🔍 [Report] ========== CALCULATING DIVISION ${divIndex + 1}/${divisionMap.size}: ${divisionName} ==========`);
         
         const totalChecks = checks.length;
-        const totalAmount = checks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
-        
         // Calculate hourly vs per diem amounts for this division (across all employees)
         let hourlyAmount = 0;
         let perdiemAmount = 0;
+        let ptoAmount = 0;
+        let otherPayAmount = 0;
+        let expensesAmount = 0;
         
-        console.log(`🔍 [Report] Division: ${divisionName}`);
-        console.log(`🔍 [Report] Division checks count: ${checks.length}`);
-        console.log(`🔍 [Report] Division clients:`, Array.from(clients));
-        console.log(`🔍 [Report] Division total amount: ${totalAmount}`);
+        logger.log(`🔍 [Report] Division: ${divisionName}`);
+        logger.log(`🔍 [Report] Division checks count: ${checks.length}`);
+        logger.log(`🔍 [Report] Division clients:`, Array.from(clients));
+        logger.log(`🔍 [Report] Division total amount will be derived from hourly + per diem + expenses calculations`);
         
         checks.forEach((check, checkIndex) => {
-          console.log(`🔍 [Report] ========== PROCESSING CHECK ${checkIndex + 1}/${checks.length} FOR DIVISION ${divisionName} ==========`);
-          console.log(`🔍 [Report] Check ID: ${check.id}`);
-          console.log(`🔍 [Report] Check Amount: ${check.amount}`);
-          console.log(`🔍 [Report] Employee: ${check.employeeId || 'Unknown Employee'}`);
+          logger.log(`🔍 [Report] ========== PROCESSING CHECK ${checkIndex + 1}/${checks.length} FOR DIVISION ${divisionName} ==========`);
+          logger.log(`🔍 [Report] Check ID: ${check.id}`);
+          logger.log(`🔍 [Report] Check Amount: ${check.amount}`);
+          logger.log(`🔍 [Report] Employee: ${check.employeeId || 'Unknown Employee'}`);
+          
+          const divisionRelationships = (check.relationshipDetails || []).filter(rel => 
+            getDivisionNameForRelationship(check, rel) === divisionName
+          );
           
           // Calculate amounts using relationship-specific data first
-          if (check.relationshipDetails && check.relationshipDetails.length > 0) {
-            console.log(`🔍 [Report] Processing check ${check.id} with ${check.relationshipDetails?.length || 0} relationships`);
-            check.relationshipDetails.forEach((rel, relIndex) => {
-              console.log(`🔍 [Report] ========== RELATIONSHIP ${relIndex + 1}/${check.relationshipDetails?.length || 0} FOR CHECK ${check.id} ==========`);
-              console.log(`🔍 [Report] Relationship details:`, {
+          if (divisionRelationships.length > 0) {
+            logger.log(`🔍 [Report] Processing check ${check.id} with ${divisionRelationships.length} relationships for division ${divisionName}`);
+            divisionRelationships.forEach((rel, relIndex) => {
+              logger.log(`🔍 [Report] ========== RELATIONSHIP ${relIndex + 1}/${check.relationshipDetails?.length || 0} FOR CHECK ${check.id} ==========`);
+              logger.log(`🔍 [Report] Relationship details:`, {
                 relId: rel.id,
                 relClientName: rel.clientName,
                 payType: rel.payType,
@@ -920,7 +1099,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
               });
               
               if (rel.payType === 'hourly') {
-                console.log(`🔍 [Report] Processing HOURLY relationship for ${rel.clientName}`);
+                logger.log(`🔍 [Report] Processing HOURLY relationship for ${rel.clientName}`);
                 
                 // Calculate relationship-specific hourly amounts
                 // Fallback to top-level check fields if relationshipDetails doesn't have hours
@@ -929,7 +1108,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                 const relHolidayHours = rel.holidayHours || check.holidayHours || 0;
                 const relPayRate = rel.payRate || 0;
                 
-                console.log(`🔍 [Report] Hourly values:`, {
+                logger.log(`🔍 [Report] Hourly values:`, {
                   relHours,
                   relOtHours,
                   relHolidayHours,
@@ -942,34 +1121,34 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                 
                 const totalHourlyPay = regularPay + otPay + holidayPay;
                 
-                console.log(`🔍 [Report] Hourly calculation for ${rel.clientName} in division ${divisionName}:`, {
+                logger.log(`🔍 [Report] Hourly calculation for ${rel.clientName} in division ${divisionName}:`, {
                   regularPay: `${relHours} × ${relPayRate} = ${regularPay}`,
                   otPay: `${relOtHours} × ${relPayRate * 1.5} = ${otPay}`,
                   holidayPay: `${relHolidayHours} × ${relPayRate * 2} = ${holidayPay}`,
                   totalHourlyPay
                 });
                 
-                console.log(`🔍 [Report] BEFORE adding hourly amount: ${hourlyAmount}`);
+                logger.log(`🔍 [Report] BEFORE adding hourly amount: ${hourlyAmount}`);
                 hourlyAmount += totalHourlyPay;
-                console.log(`🔍 [Report] AFTER adding hourly amount: ${hourlyAmount}`);
+                logger.log(`🔍 [Report] AFTER adding hourly amount: ${hourlyAmount}`);
                 
-                // Add relationship-specific other pay to hourly amount
+                // Track other pay separately (don't add to hourlyAmount)
                 if (rel.otherPay && rel.otherPay.length > 0) {
-                  console.log(`🔍 [Report] Processing OTHER PAY for ${rel.clientName}:`, rel.otherPay);
+                  logger.log(`🔍 [Report] Processing OTHER PAY for ${rel.clientName}:`, rel.otherPay);
                   const otherPayTotal = rel.otherPay.reduce((sum, item) => 
                     sum + parseFloat(item.amount || '0'), 0);
-                  console.log(`🔍 [Report] Other pay total for ${rel.clientName} in division ${divisionName}:`, {
+                  logger.log(`🔍 [Report] Other pay total for ${rel.clientName} in division ${divisionName}:`, {
                     otherPayItems: rel.otherPay,
                     otherPayTotal
                   });
-                  console.log(`🔍 [Report] BEFORE adding other pay: ${hourlyAmount}`);
-                  hourlyAmount += otherPayTotal;
-                  console.log(`🔍 [Report] AFTER adding other pay: ${hourlyAmount}`);
+                  logger.log(`🔍 [Report] BEFORE adding other pay: ${otherPayAmount}`);
+                  otherPayAmount += otherPayTotal;
+                  logger.log(`🔍 [Report] AFTER adding other pay: ${otherPayAmount}`);
                 } else {
-                  console.log(`🔍 [Report] No other pay for ${rel.clientName}`);
+                  logger.log(`🔍 [Report] No other pay for ${rel.clientName}`);
                 }
               } else if (rel.payType === 'perdiem') {
-                console.log(`🔍 [Report] Processing PER DIEM relationship for ${rel.clientName}`);
+                logger.log(`🔍 [Report] Processing PER DIEM relationship for ${rel.clientName}`);
                 
                 // Calculate relationship-specific per diem amounts
                 // Fallback to top-level check fields if relationshipDetails doesn't have per diem data
@@ -977,7 +1156,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                 
                 const hasBreakdown = rel.perdiemBreakdown !== undefined ? rel.perdiemBreakdown : check.perdiemBreakdown;
                 if (hasBreakdown) {
-                  console.log(`🔍 [Report] Processing per diem breakdown for ${rel.clientName}`);
+                  logger.log(`🔍 [Report] Processing per diem breakdown for ${rel.clientName}`);
                   // Sum daily breakdown - use rel values or fallback to check values
                   relPerdiemTotal = (rel.perdiemMonday || check.perdiemMonday || 0) + 
                                    (rel.perdiemTuesday || check.perdiemTuesday || 0) + 
@@ -986,32 +1165,57 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                                    (rel.perdiemFriday || check.perdiemFriday || 0) + 
                                    (rel.perdiemSaturday || check.perdiemSaturday || 0) + 
                                    (rel.perdiemSunday || check.perdiemSunday || 0);
-                  console.log(`🔍 [Report] Daily breakdown total: ${relPerdiemTotal}`);
+                  logger.log(`🔍 [Report] Daily breakdown total: ${relPerdiemTotal}`);
                 } else {
                   relPerdiemTotal = rel.perdiemAmount || check.perdiemAmount || 0;
-                  console.log(`🔍 [Report] Using per diem amount directly: ${relPerdiemTotal}`);
+                  logger.log(`🔍 [Report] Using per diem amount directly: ${relPerdiemTotal}`);
                 }
                 
-                console.log(`🔍 [Report] Per diem calculation for ${rel.clientName} in division ${divisionName}:`, {
+                // Add PTO amount for per diem employees (simple dollar amount, not hours × rate)
+                const relPtoAmount = (rel as any).ptoAmount || 0;
+                logger.log(`🔍 [Report] PTO amount for ${rel.clientName}: ${relPtoAmount}`);
+                
+                logger.log(`🔍 [Report] Per diem calculation for ${rel.clientName} in division ${divisionName}:`, {
                   perdiemAmount: rel.perdiemAmount,
                   perdiemBreakdown: rel.perdiemBreakdown,
-                  relPerdiemTotal
+                  relPerdiemTotal,
+                  ptoAmount: relPtoAmount
                 });
                 
-                console.log(`🔍 [Report] BEFORE adding per diem amount: ${perdiemAmount}`);
+                logger.log(`🔍 [Report] BEFORE adding per diem amount: ${perdiemAmount}`);
                 perdiemAmount += relPerdiemTotal;
-                console.log(`🔍 [Report] AFTER adding per diem amount: ${perdiemAmount}`);
+                logger.log(`🔍 [Report] AFTER adding per diem amount: ${perdiemAmount}`);
+                
+                // Track PTO amount separately (don't add to perdiemAmount)
+                logger.log(`🔍 [Report] BEFORE adding PTO amount: ${ptoAmount}`);
+                ptoAmount += relPtoAmount;
+                logger.log(`🔍 [Report] AFTER adding PTO amount: ${ptoAmount}`);
+                
+                // Track other pay for per diem relationships separately
+                if (rel.otherPay && rel.otherPay.length > 0) {
+                  const otherPayTotal = rel.otherPay.reduce((sum, item) => 
+                    sum + parseFloat(item.amount || '0'), 0);
+                  logger.log(`🔍 [Report] Other pay for per diem ${rel.clientName}: ${otherPayTotal}`);
+                  otherPayAmount += otherPayTotal;
+                }
               } else {
-                console.log(`🔍 [Report] Unknown pay type for ${rel.clientName}: ${rel.payType}`);
+                logger.log(`🔍 [Report] Unknown pay type for ${rel.clientName}: ${rel.payType}`);
               }
             });
-          } else {
+          } else if (!check.relationshipDetails || check.relationshipDetails.length === 0) {
             // Fallback to check-wide data for single client checks
             if (check.payType === 'hourly' || check.payType === 'mixed') {
               const hourlyTotal = (check.hours || 0) * (check.payRate || 0) +
                                  (check.overtimeHours || 0) * (check.overtimeRate || 0) +
                                  (check.holidayHours || 0) * (check.holidayRate || 0);
               hourlyAmount += hourlyTotal;
+              
+              // Track other pay separately for single client checks
+              if (check.otherPay && check.otherPay.length > 0) {
+                const otherPayTotal = check.otherPay.reduce((sum: number, item: any) => 
+                  sum + parseFloat(item.amount || '0'), 0);
+                otherPayAmount += otherPayTotal;
+              }
             }
             
             if (check.payType === 'perdiem' || check.payType === 'mixed') {
@@ -1026,37 +1230,69 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                               (check.perdiemSunday || 0);
               }
               perdiemAmount += perdiemTotal;
+              
+              // Track PTO amount for single client per diem checks (if stored at check level)
+              // Note: PTO is typically stored in relationshipDetails, but check for legacy data
+              const checkPtoAmount = (check as any).ptoAmount || 0;
+              if (checkPtoAmount > 0) {
+                ptoAmount += checkPtoAmount;
+              }
+              
+              // Track other pay separately for per diem single client checks
+              if (check.otherPay && check.otherPay.length > 0) {
+                const otherPayTotal = check.otherPay.reduce((sum: number, item: any) => 
+                  sum + parseFloat(item.amount || '0'), 0);
+                otherPayAmount += otherPayTotal;
+              }
             }
+          } else {
+            logger.warn('⚠️ [Report] Division relationships missing for check with relationship details', {
+              divisionName,
+              checkId: check.id
+            });
+          }
+          
+          // Calculate expenses for this check
+          if (check.isExpense || check.payType === 'expense') {
+            expensesAmount += parseFloat(check.amount?.toString() || '0');
           }
         });
         
-        console.log(`🔍 [Report] ========== FINAL TOTALS FOR DIVISION ${divisionName} ==========`);
-        console.log(`🔍 [Report] Division: ${divisionName}`);
-        console.log(`🔍 [Report] Total Checks: ${totalChecks}`);
-        console.log(`🔍 [Report] Total Amount: ${totalAmount}`);
-        console.log(`🔍 [Report] Hourly Amount: ${hourlyAmount}`);
-        console.log(`🔍 [Report] Per Diem Amount: ${perdiemAmount}`);
-        console.log(`🔍 [Report] Clients:`, Array.from(clients));
-        console.log(`🔍 [Report] ========== END DIVISION ${divisionName} ==========`);
+        const divisionTotalAmount = hourlyAmount + perdiemAmount + ptoAmount + otherPayAmount + expensesAmount;
+        logger.log(`🔍 [Report] ========== FINAL TOTALS FOR DIVISION ${divisionName} ==========`);
+        logger.log(`🔍 [Report] Division: ${divisionName}`);
+        logger.log(`🔍 [Report] Total Checks: ${totalChecks}`);
+        logger.log(`🔍 [Report] Total Amount: ${divisionTotalAmount}`);
+        logger.log(`🔍 [Report] Hourly Amount: ${hourlyAmount}`);
+        logger.log(`🔍 [Report] Per Diem Amount: ${perdiemAmount}`);
+        logger.log(`🔍 [Report] PTO Amount: ${ptoAmount}`);
+        logger.log(`🔍 [Report] Other Pay Amount: ${otherPayAmount}`);
+        logger.log(`🔍 [Report] Expenses Amount: ${expensesAmount}`);
+        logger.log(`🔍 [Report] Clients:`, Array.from(clients));
+        logger.log(`🔍 [Report] ========== END DIVISION ${divisionName} ==========`);
         
         return {
           divisionName,
           totalChecks,
-          totalAmount,
+          totalAmount: divisionTotalAmount,
           hourlyAmount,
           perdiemAmount,
+          ptoAmount,
+          otherPayAmount,
+          expensesAmount,
           checks
         };
       });
       
-      console.log(`🔍 [Report] ========== FINAL DIVISION BREAKDOWN FOR ${company.name} ==========`);
+      logger.log(`🔍 [Report] ========== FINAL DIVISION BREAKDOWN FOR ${company.name} ==========`);
       divisionBreakdown.forEach((div, index) => {
-        console.log(`🔍 [Report] Division ${index + 1}:`, {
+        logger.log(`🔍 [Report] Division ${index + 1}:`, {
           name: div.divisionName,
           checks: div.totalChecks,
           amount: div.totalAmount,
           hourly: div.hourlyAmount,
-          perdiem: div.perdiemAmount
+          perdiem: div.perdiemAmount,
+          expenses: div.expensesAmount
         });
       });
 
@@ -1068,14 +1304,20 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         totalAmount: divisionBreakdown.reduce((sum, div) => sum + div.totalAmount, 0),
         hourlyAmount: divisionBreakdown.reduce((sum, div) => sum + div.hourlyAmount, 0),
         perdiemAmount: divisionBreakdown.reduce((sum, div) => sum + div.perdiemAmount, 0),
+        ptoAmount: divisionBreakdown.reduce((sum, div) => sum + div.ptoAmount, 0),
+        otherPayAmount: divisionBreakdown.reduce((sum, div) => sum + div.otherPayAmount, 0),
+        expensesAmount: divisionBreakdown.reduce((sum, div) => sum + div.expensesAmount, 0),
         divisionBreakdown,
         checks: companyChecks
       }];
 
+      // Use the breakdown totalAmount instead of companyTotalAmount to ensure consistency
+      const correctCompanyTotal = divisionBreakdown.reduce((sum, div) => sum + div.totalAmount, 0);
+
       companyReports.push({
         company,
         totalChecks: companyChecks.length,
-        totalAmount,
+        totalAmount: correctCompanyTotal,
         clientBreakdown,
         checks: companyChecks
       });
@@ -1090,87 +1332,52 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
     setSuccess(null);
 
     try {
-      // Filter clients based on active/inactive filter
-      const filteredClients = clients.filter(client => filters.includeInactive || client.active);
-      
-      // Prepare client breakdown data
-      const clientBreakdownData = filteredClients.map(client => {
-        const clientChecks = filteredChecks.filter(check => 
-          check.clientId === client.id || 
-          check.relationshipDetails?.some(rel => rel.clientId === client.id)
-        );
-        
-        if (clientChecks.length === 0) return null;
-        
-        const totalAmount = clientChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
-        const totalChecks = clientChecks.length;
-        
-        // Calculate hourly vs per diem amounts
-        let hourlyAmount = 0;
-        let perdiemAmount = 0;
-        
-        clientChecks.forEach(check => {
-          if (check.payType === 'hourly' || check.payType === 'mixed') {
-            const hourlyTotal = (check.hours || 0) * (check.payRate || 0) +
-                               (check.overtimeHours || 0) * (check.overtimeRate || 0) +
-                               (check.holidayHours || 0) * (check.holidayRate || 0);
-            hourlyAmount += hourlyTotal;
-          }
-          
-          if (check.payType === 'perdiem' || check.payType === 'mixed') {
-            let perdiemTotal = check.perdiemAmount || 0;
-            if (check.perdiemBreakdown) {
-              perdiemTotal = (check.perdiemMonday || 0) + 
-                            (check.perdiemTuesday || 0) + 
-                            (check.perdiemWednesday || 0) + 
-                            (check.perdiemThursday || 0) + 
-                            (check.perdiemFriday || 0) + 
-                            (check.perdiemSaturday || 0) + 
-                            (check.perdiemSunday || 0);
-            }
-            perdiemAmount += perdiemTotal;
-          }
-        });
+      // Build data rows directly from the currently visible stats to ensure parity with UI
+      const clientBreakdownData = visibleClientStats.map(stat => ({
+        client: stat.clientName,
+        company: stat.companyName,
+        totalChecks: stat.totalChecks,
+        hourlyAmount: stat.hourlyAmount,
+        perdiemAmount: stat.perdiemAmount,
+        ptoAmount: stat.ptoAmount,
+        otherPayAmount: stat.otherPayAmount,
+        expensesAmount: stat.expensesAmount,
+        totalAmount: stat.totalAmount,
+        status: stat.isActive ? 'Active' : 'Inactive'
+      }));
 
-        const company = companies.find(c => c.id === clientChecks[0]?.companyId);
-        
-        return {
-          client: client.name,
-          company: company?.name || 'Unknown',
-          totalChecks: totalChecks,
-          hourlyAmount: hourlyAmount,
-          perdiemAmount: perdiemAmount,
-          totalAmount: totalAmount,
-          status: client.active ? 'Active' : 'Inactive'
-        };
-      }).filter(Boolean);
-
-      // Calculate totals
-      const totals = clientBreakdownData.reduce((acc, item) => ({
-        totalChecks: acc.totalChecks + item!.totalChecks,
-        hourlyAmount: acc.hourlyAmount + item!.hourlyAmount,
-        perdiemAmount: acc.perdiemAmount + item!.perdiemAmount,
-        totalAmount: acc.totalAmount + item!.totalAmount
-      }), { totalChecks: 0, hourlyAmount: 0, perdiemAmount: 0, totalAmount: 0 });
+      // Use the same totals shown in the UI (unique checks/amounts)
+      const totals = {
+        totalChecks: filteredChecks.length,
+        hourlyAmount: departmentTotals.hourlyAmount,
+        perdiemAmount: departmentTotals.perdiemAmount,
+        ptoAmount: departmentTotals.ptoAmount,
+        otherPayAmount: departmentTotals.otherPayAmount,
+        expensesAmount: departmentTotals.expensesAmount,
+        totalAmount: departmentTotals.totalAmount
+      };
 
       // Create workbook with ExcelJS
       const workbook = new ExcelJS.Workbook();
-      const worksheet = workbook.addWorksheet('Client Breakdown');
+      const worksheet = workbook.addWorksheet('Department Breakdown');
 
       // Define columns
       worksheet.columns = [
-        { header: 'Client', key: 'client', width: 25 },
+        { header: 'Department', key: 'client', width: 25 },
         { header: 'Company', key: 'company', width: 20 },
         { header: 'Total Checks', key: 'totalChecks', width: 15 },
         { header: 'Hourly Amount', key: 'hourlyAmount', width: 15 },
         { header: 'Per Diem Amount', key: 'perdiemAmount', width: 16 },
+        { header: 'PTO Amount', key: 'ptoAmount', width: 15 },
+        { header: 'Other Amount', key: 'otherPayAmount', width: 15 },
+        { header: 'Expenses', key: 'expensesAmount', width: 15 },
         { header: 'Total Amount', key: 'totalAmount', width: 15 },
         { header: 'Status', key: 'status', width: 12 }
       ];
 
       // Add data rows
       clientBreakdownData.forEach(item => {
-        worksheet.addRow(item!);
+        worksheet.addRow(item);
       });
 
       // Add total row
@@ -1180,8 +1387,17 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         totalChecks: totals.totalChecks,
         hourlyAmount: totals.hourlyAmount,
         perdiemAmount: totals.perdiemAmount,
+        ptoAmount: totals.ptoAmount,
+        otherPayAmount: totals.otherPayAmount,
+        expensesAmount: totals.expensesAmount,
         totalAmount: totals.totalAmount,
         status: ''
+      });
+
+      // Format currency columns (D, E, F, G, H, I) as dollars
+      const currencyColumns = ['D', 'E', 'F', 'G', 'H', 'I']; // hourlyAmount, perdiemAmount, ptoAmount, otherPayAmount, expensesAmount, totalAmount
+      currencyColumns.forEach(col => {
+        worksheet.getColumn(col).numFmt = '$#,##0.00';
       });
 
       // Apply professional styling
@@ -1190,7 +1406,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
       // Generate filename with date range
       const startDate = filters.startDate ? new Date(filters.startDate).toLocaleDateString() : 'All';
       const endDate = filters.endDate ? new Date(filters.endDate).toLocaleDateString() : 'All';
-      const filename = `Client_Breakdown_${startDate}_to_${endDate}.xlsx`;
+      const filename = `Department_Breakdown_${startDate}_to_${endDate}.xlsx`;
 
       // Write to buffer and download
       const buffer = await workbook.xlsx.writeBuffer();
@@ -1202,10 +1418,10 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
       link.click();
       window.URL.revokeObjectURL(url);
 
-      setSuccess(`Departments Breakdown exported successfully as ${filename}`);
+      setSuccess(`Department Breakdown exported successfully as ${filename}`);
     } catch (err) {
       console.error('Export error:', err);
-      setError('Failed to export Client Breakdown. Please try again.');
+      setError('Failed to export Department Breakdown. Please try again.');
     } finally {
       setExporting(false);
     }
@@ -1228,26 +1444,69 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         return employee.companyId === companyId;
       });
       
-      // Prepare employee summary data with sorting
+      // Prepare employee summary data with sorting - show all employees, even with no checks
       const employeeSummaryData = filteredEmployees
         .map((employee) => {
           const employeeChecks = filteredChecks.filter(check => check.employeeId === employee.id);
           
-          if (employeeChecks.length === 0) return null;
+          // Show all employees, even if they have no checks (they'll show 0 values)
           
           const totalAmount = employeeChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
           const totalChecks = employeeChecks.length;
-          const averagePerCheck = totalChecks > 0 ? totalAmount / totalChecks : 0;
+          
+          // Calculate hours and pay breakdown
+          let totalRegularHours = 0;
+          let totalOtHours = 0;
+          let totalHolidayHours = 0;
+          let totalPerDiem = 0;
+          let totalOtherPay = 0;
+          
+          employeeChecks.forEach(check => {
+            // Handle relationship-specific data
+            if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+              check.relationshipDetails.forEach(rel => {
+                totalRegularHours += rel.hours || 0;
+                totalOtHours += rel.otHours || 0;
+                totalHolidayHours += rel.holidayHours || 0;
+                totalPerDiem += rel.perdiemAmount || 0;
+                if (rel.otherPay) {
+                  rel.otherPay.forEach(op => {
+                    totalOtherPay += parseFloat(op.amount || '0');
+                  });
+                }
+              });
+            } else {
+              // Fallback to check-level data
+              totalRegularHours += check.hours || 0;
+              totalOtHours += (check.otHours || check.overtimeHours || 0);
+              totalHolidayHours += check.holidayHours || 0;
+              totalPerDiem += check.perdiemAmount || 0;
+              if (check.otherPay) {
+                check.otherPay.forEach(op => {
+                  totalOtherPay += parseFloat(op.amount || '0');
+                });
+              }
+            }
+          });
           
           const company = companies.find(c => c.id === employee.companyId);
           
           return {
             employee: employee.name,
+            address: employee.address || 'N/A',
+            position: employee.position || 'N/A',
             company: company?.name || 'Unknown',
-        role: employee.role || employee.position || 'N/A',
+            role: employee.role || employee.position || 'N/A',
+            startDate: employee.startDate ? new Date(employee.startDate + 'T00:00:00').toLocaleDateString() : 'N/A',
             totalChecks,
+            totalRegularHours: totalRegularHours.toFixed(2),
+            totalOtHours: totalOtHours.toFixed(2),
+            totalHolidayHours: totalHolidayHours.toFixed(2),
+            totalPerDiem: `$${totalPerDiem.toFixed(2)}`,
+            totalOtherPay: `$${totalOtherPay.toFixed(2)}`,
             totalAmount,
-            averagePerCheck
+            // Store formatted versions for display
+            totalAmountFormatted: `$${totalAmount.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
           };
         })
         .filter(Boolean)
@@ -1264,48 +1523,238 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
       // Calculate totals
       const totals = employeeSummaryData.reduce((acc, item) => ({
         totalChecks: acc.totalChecks + item!.totalChecks,
-        totalAmount: acc.totalAmount + item!.totalAmount
-      }), { totalChecks: 0, totalAmount: 0 });
+        totalAmount: acc.totalAmount + item!.totalAmount,
+        totalRegularHours: acc.totalRegularHours + parseFloat(item!.totalRegularHours || '0'),
+        totalOtHours: acc.totalOtHours + parseFloat(item!.totalOtHours || '0'),
+        totalHolidayHours: acc.totalHolidayHours + parseFloat(item!.totalHolidayHours || '0'),
+        totalPerDiem: acc.totalPerDiem + parseFloat(item!.totalPerDiem.replace('$', '').replace(/,/g, '') || '0'),
+        totalOtherPay: acc.totalOtherPay + parseFloat(item!.totalOtherPay.replace('$', '').replace(/,/g, '') || '0')
+      }), { 
+        totalChecks: 0, 
+        totalAmount: 0,
+        totalRegularHours: 0,
+        totalOtHours: 0,
+        totalHolidayHours: 0,
+        totalPerDiem: 0,
+        totalOtherPay: 0
+      });
 
       // Create workbook with ExcelJS
       const workbook = new ExcelJS.Workbook();
       const company = companies.find(c => c.id === companyId);
-      const sheetName = companyId === 'all' ? 'Employee Summary' : `${company?.name || 'Company'} Employees`;
-      const worksheet = workbook.addWorksheet(sheetName);
 
-      // Define columns
-      worksheet.columns = [
-        { header: 'Employee', key: 'employee', width: 25 },
-        { header: 'Company', key: 'company', width: 20 },
-        { header: 'Role', key: 'role', width: 20 },
-        { header: 'Total Checks', key: 'totalChecks', width: 15 },
-        { header: 'Total Amount', key: 'totalAmount', width: 15 },
-        { header: 'Average per Check', key: 'averagePerCheck', width: 18 }
-      ];
-
-      // Add data rows
-      employeeSummaryData.forEach(item => {
-        worksheet.addRow(item!);
+      // Create a separate worksheet for each employee
+      employeeSummaryData.forEach((item) => {
+        const employee = employees.find(emp => emp.name === item!.employee);
+        if (!employee) return;
+        
+        // Sanitize employee name for sheet name (Excel sheet names have limitations)
+        const sanitizedName = item!.employee.replace(/[\\\/\?\*\[\]]/g, '_').substring(0, 31);
+        const worksheet = workbook.addWorksheet(sanitizedName);
+        
+        // Employee Info Section
+        worksheet.addRow(['Employee Info']);
+        const infoHeaderRow = worksheet.getRow(worksheet.rowCount);
+        infoHeaderRow.font = { bold: true, size: 14 };
+        infoHeaderRow.height = 25;
+        
+        // Employee info in one row with headers
+        const employeeInfoHeaderRow = worksheet.addRow([
+          'Name',
+          'Address',
+          'Position',
+          'Company',
+          'Role',
+          'Start Date'
+        ]);
+        employeeInfoHeaderRow.font = { bold: true };
+        employeeInfoHeaderRow.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFE3F2FD' } // Light blue
+        };
+        employeeInfoHeaderRow.height = 20;
+        
+        const employeeInfoRow = worksheet.addRow([
+          item!.employee,
+          item!.address,
+          item!.position,
+          item!.company,
+          item!.role,
+          item!.startDate
+        ]);
+        
+        worksheet.addRow([]); // Empty row for spacing
+        
+        // CHECKS Section Header
+        worksheet.addRow(['CHECKS']);
+        const checksHeaderRow = worksheet.getRow(worksheet.rowCount);
+        checksHeaderRow.font = { bold: true, size: 14 };
+        checksHeaderRow.height = 25;
+        worksheet.addRow([]); // Empty row for spacing
+        
+        // Add header row for checks table
+        const headerRow = worksheet.addRow([
+          'Check #',
+          'Date',
+          'Client',
+          'Regular Hrs',
+          'OT Hrs',
+          'PTO Hrs',
+          'Per Diem',
+          'Other Pay',
+          'Amount'
+        ]);
+        
+        // Style header row
+        headerRow.font = { bold: true };
+        headerRow.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFE3F2FD' } // Light blue
+        };
+        headerRow.height = 20;
+        
+        // Set column widths manually
+        worksheet.getColumn(1).width = 12; // Check #
+        worksheet.getColumn(2).width = 15; // Date
+        worksheet.getColumn(3).width = 20; // Client
+        worksheet.getColumn(4).width = 15; // Regular Hrs
+        worksheet.getColumn(5).width = 15; // OT Hrs
+        worksheet.getColumn(6).width = 15; // PTO Hrs
+        worksheet.getColumn(7).width = 15; // Per Diem
+        worksheet.getColumn(8).width = 15; // Other Pay
+        worksheet.getColumn(9).width = 15; // Amount
+        
+        const employeeChecks = filteredChecks
+          .filter(check => check.employeeId === employee.id)
+          .sort((a, b) => {
+            // Sort by date, most recent first
+            const dateA = a.date?.toDate ? a.date.toDate() : new Date(a.date);
+            const dateB = b.date?.toDate ? b.date.toDate() : new Date(b.date);
+            return dateB.getTime() - dateA.getTime();
+          });
+        
+        // Add individual check rows
+        let empTotalRegularHours = 0;
+        let empTotalOtHours = 0;
+        let empTotalHolidayHours = 0;
+        let empTotalPerDiem = 0;
+        let empTotalOtherPay = 0;
+        let empTotalAmount = 0;
+        
+        employeeChecks.forEach(check => {
+          let checkRegularHours = 0;
+          let checkOtHours = 0;
+          let checkHolidayHours = 0;
+          let checkPerDiem = 0;
+          let checkOtherPay = 0;
+          let checkClientName = 'N/A';
+          
+          if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+            check.relationshipDetails.forEach(rel => {
+              checkRegularHours += rel.hours || 0;
+              checkOtHours += rel.otHours || 0;
+              checkHolidayHours += rel.holidayHours || 0;
+              checkPerDiem += rel.perdiemAmount || 0;
+              if (rel.otherPay) {
+                rel.otherPay.forEach(op => {
+                  checkOtherPay += parseFloat(op.amount || '0');
+                });
+              }
+              if (rel.clientName) {
+                checkClientName = rel.clientName;
+              }
+            });
+          } else {
+            checkRegularHours = check.hours || 0;
+            checkOtHours = check.otHours || check.overtimeHours || 0;
+            checkHolidayHours = check.holidayHours || 0;
+            checkPerDiem = check.perdiemAmount || 0;
+            if (check.otherPay) {
+              check.otherPay.forEach(op => {
+                checkOtherPay += parseFloat(op.amount || '0');
+              });
+            }
+            const client = clients.find(c => c.id === check.clientId);
+            checkClientName = client?.name || 'N/A';
+          }
+          
+          empTotalRegularHours += checkRegularHours;
+          empTotalOtHours += checkOtHours;
+          empTotalHolidayHours += checkHolidayHours;
+          empTotalPerDiem += checkPerDiem;
+          empTotalOtherPay += checkOtherPay;
+          empTotalAmount += parseFloat(check.amount?.toString() || '0');
+          
+          const checkDate = check.date?.toDate ? check.date.toDate() : new Date(check.date);
+          
+          // Add row as array to prevent header creation
+          worksheet.addRow([
+            check.checkNumber || '',
+            checkDate.toLocaleDateString(),
+            checkClientName,
+            checkRegularHours > 0 ? checkRegularHours.toFixed(2) : '',
+            checkOtHours > 0 ? checkOtHours.toFixed(2) : '',
+            checkHolidayHours > 0 ? checkHolidayHours.toFixed(2) : '',
+            checkPerDiem > 0 ? `$${checkPerDiem.toFixed(2)}` : '',
+            checkOtherPay > 0 ? `$${checkOtherPay.toFixed(2)}` : '',
+            `$${parseFloat(check.amount?.toString() || '0').toFixed(2)}`
+          ]);
+        });
+        
+        // Add employee total row as array
+        const totalRow = worksheet.addRow([
+          '',
+          '',
+          'TOTAL',
+          empTotalRegularHours.toFixed(2),
+          empTotalOtHours.toFixed(2),
+          empTotalHolidayHours.toFixed(2),
+          `$${empTotalPerDiem.toFixed(2)}`,
+          `$${empTotalOtherPay.toFixed(2)}`,
+          `$${empTotalAmount.toFixed(2)}`
+        ]);
+        
+        // Style total row
+        totalRow.font = { bold: true };
+        totalRow.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFF5F5F5' } // Light gray
+        };
+        
+        // Apply professional styling
+        applyProfessionalStyling(worksheet, true);
       });
-
-      // Add total row
-      worksheet.addRow({
-        employee: 'TOTAL',
-        company: '',
-        role: '',
-        totalChecks: totals.totalChecks,
-        totalAmount: totals.totalAmount,
-        averagePerCheck: ''
-      });
-
-      // Apply professional styling
-      applyProfessionalStyling(worksheet, true);
 
       // Generate filename
-      const startDate = filters.startDate ? new Date(filters.startDate).toLocaleDateString() : 'All';
-      const endDate = filters.endDate ? new Date(filters.endDate).toLocaleDateString() : 'All';
-      const companyName = companyId === 'all' ? 'All_Companies' : (company?.name || 'Company').replace(/\s+/g, '_');
-      const filename = `Employee_Summary_${companyName}_${startDate}_to_${endDate}.xlsx`;
+      let filename: string;
+      if (selectedEmployeeIds && selectedEmployeeIds.length === 1) {
+        // If only one employee is selected, use their name in the filename
+        const selectedEmployee = employees.find(emp => emp.id === selectedEmployeeIds[0]);
+        const employeeName = selectedEmployee?.name || 'Employee';
+        const sanitizedName = employeeName.replace(/[^a-zA-Z0-9]/g, '_');
+        filename = `${sanitizedName}_summary_export.xlsx`;
+      } else if (selectedEmployeeIds && selectedEmployeeIds.length > 1) {
+        // If multiple employees are selected, use company name
+        const companyName = companyId === 'all' 
+          ? (() => {
+              // Try to get company from first selected employee
+              const firstEmployee = employees.find(emp => emp.id === selectedEmployeeIds[0]);
+              const firstCompany = firstEmployee ? companies.find(c => c.id === firstEmployee.companyId) : null;
+              return firstCompany?.name || 'All_Companies';
+            })()
+          : (company?.name || 'Company');
+        const sanitizedCompanyName = companyName.replace(/[^a-zA-Z0-9]/g, '_');
+        filename = `Employee_summary_${sanitizedCompanyName}.xlsx`;
+      } else {
+        // Default format for all employees
+        const startDate = filters.startDate ? new Date(filters.startDate).toLocaleDateString() : 'All';
+        const endDate = filters.endDate ? new Date(filters.endDate).toLocaleDateString() : 'All';
+        const companyName = companyId === 'all' ? 'All_Companies' : (company?.name || 'Company').replace(/\s+/g, '_');
+        filename = `Employee_Summary_${companyName}_${startDate}_to_${endDate}.xlsx`;
+      }
 
       // Write to buffer and download
       const buffer = await workbook.xlsx.writeBuffer();
@@ -1325,6 +1774,174 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
     } finally {
       setExporting(false);
     }
+  };
+
+  const exportExpensesToExcel = async () => {
+    setExporting(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      const expenseChecks = filteredChecks.filter(check => check.isExpense || check.payType === 'expense');
+      
+      if (expenseChecks.length === 0) {
+        setError('No expenses found for the selected filters.');
+        return;
+      }
+
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Expenses');
+
+      worksheet.columns = [
+        { header: 'Check Number', key: 'checkNumber', width: 15 },
+        { header: 'Company', key: 'company', width: 25 },
+        { header: 'Expense Name', key: 'expenseName', width: 30 },
+        { header: 'Description', key: 'description', width: 40 },
+        { header: 'Date', key: 'date', width: 15 },
+        { header: 'Amount', key: 'amount', width: 15 },
+        { header: 'Memo', key: 'memo', width: 40 }
+      ];
+
+      expenseChecks.forEach(check => {
+        const company = companies.find(c => c.id === check.companyId);
+        const checkDate = check.date?.toDate ? check.date.toDate() : new Date(check.date);
+        const amount = parseFloat(check.amount?.toString() || '0');
+        
+        worksheet.addRow({
+          checkNumber: check.checkNumber || check.id,
+          company: company?.name || 'Unknown Company',
+          expenseName: check.expenseName || 'N/A',
+          description: check.expenseDescription || check.memo || 'N/A',
+          date: checkDate.toLocaleDateString(),
+          amount: `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          memo: check.memo || ''
+        });
+      });
+
+      // Add total row
+      const totalExpenses = expenseChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
+      worksheet.addRow({
+        checkNumber: 'TOTAL',
+        company: '',
+        expenseName: '',
+        description: '',
+        date: '',
+        amount: `$${totalExpenses.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        memo: ''
+      });
+
+      applyProfessionalStyling(worksheet, true);
+
+      const startDate = filters.startDate ? new Date(filters.startDate).toLocaleDateString() : 'All';
+      const endDate = filters.endDate ? new Date(filters.endDate).toLocaleDateString() : 'All';
+      const filename = `Expenses_Report_${startDate}_to_${endDate}.xlsx`;
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      window.URL.revokeObjectURL(url);
+
+      setSuccess(`Expenses report exported successfully as ${filename}`);
+    } catch (err) {
+      console.error('Export error:', err);
+      setError('Failed to export expenses report. Please try again.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // Helper function to calculate total amount correctly (hourly + per diem + expenses, where hourly includes other pay)
+  const calculateCorrectTotal = (checks: Check[]): number => {
+    let totalHourly = 0;
+    let totalPerdiem = 0;
+    let totalExpenses = 0;
+    
+    checks.forEach(check => {
+      // Calculate hourly (including other pay for relationship checks)
+      if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+        check.relationshipDetails.forEach(rel => {
+          if (rel.payType === 'hourly' || rel.payType === 'mixed') {
+            const relHours = rel.hours || 0;
+            const relOtHours = rel.otHours || 0;
+            const relHolidayHours = rel.holidayHours || 0;
+            const relPayRate = rel.payRate || 0;
+            const otRate = check.overtimeRate || relPayRate * 1.5;
+            const holidayRate = check.holidayRate || relPayRate * 2.0;
+            
+            const regularPay = relHours * relPayRate;
+            const otPay = relOtHours * otRate;
+            const holidayPay = relHolidayHours * holidayRate;
+            totalHourly += regularPay + otPay + holidayPay;
+            
+            // Add other pay to hourly
+            if (rel.otherPay && rel.otherPay.length > 0) {
+              const otherPayTotal = rel.otherPay.reduce((sum: number, item: any) => 
+                sum + parseFloat(item.amount || '0'), 0);
+              totalHourly += otherPayTotal;
+            }
+          }
+          
+          if (rel.payType === 'perdiem' || rel.payType === 'mixed') {
+            let perdiemTotal = 0;
+            const hasBreakdown = rel.perdiemBreakdown !== undefined ? rel.perdiemBreakdown : check.perdiemBreakdown;
+            if (hasBreakdown) {
+              perdiemTotal = (rel.perdiemMonday || check.perdiemMonday || 0) + 
+                           (rel.perdiemTuesday || check.perdiemTuesday || 0) + 
+                           (rel.perdiemWednesday || check.perdiemWednesday || 0) + 
+                           (rel.perdiemThursday || check.perdiemThursday || 0) + 
+                           (rel.perdiemFriday || check.perdiemFriday || 0) + 
+                           (rel.perdiemSaturday || check.perdiemSaturday || 0) + 
+                           (rel.perdiemSunday || check.perdiemSunday || 0);
+            } else {
+              perdiemTotal = rel.perdiemAmount || check.perdiemAmount || 0;
+            }
+            // Add PTO amount for per diem employees (simple dollar amount)
+            const relPtoAmount = (rel as any).ptoAmount || 0;
+            totalPerdiem += perdiemTotal + relPtoAmount;
+          }
+        });
+      } else {
+        // Single client checks
+        if (check.payType === 'hourly' || check.payType === 'mixed') {
+          const hourlyTotal = (check.hours || 0) * (check.payRate || 0) +
+                             (check.overtimeHours || 0) * (check.overtimeRate || 0) +
+                             (check.holidayHours || 0) * (check.holidayRate || 0);
+          totalHourly += hourlyTotal;
+          
+          // Add other pay for single client checks
+          if (check.otherPay && check.otherPay.length > 0) {
+            const otherPayTotal = check.otherPay.reduce((sum: number, item: any) => 
+              sum + parseFloat(item.amount || '0'), 0);
+            totalHourly += otherPayTotal;
+          }
+        }
+        
+        if (check.payType === 'perdiem' || check.payType === 'mixed') {
+          let perdiemTotal = check.perdiemAmount || 0;
+          if (check.perdiemBreakdown) {
+            perdiemTotal = (check.perdiemMonday || 0) + 
+                         (check.perdiemTuesday || 0) + 
+                         (check.perdiemWednesday || 0) + 
+                         (check.perdiemThursday || 0) + 
+                         (check.perdiemFriday || 0) + 
+                         (check.perdiemSaturday || 0) + 
+                         (check.perdiemSunday || 0);
+          }
+          totalPerdiem += perdiemTotal;
+        }
+      }
+      
+      // Calculate expenses
+      if (check.isExpense || check.payType === 'expense') {
+        totalExpenses += parseFloat(check.amount?.toString() || '0');
+      }
+    });
+    
+    return totalHourly + totalPerdiem + totalExpenses;
   };
 
   const exportToExcel = async (companyId?: string) => {
@@ -1357,7 +1974,14 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         let clientName = client?.name || 'Unknown Client';
         let divisionName = 'No Division';
         
-        if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+        // Check if this is an expense check first
+        const isExpenseCheck = check.isExpense || check.payType === 'expense';
+        
+        if (isExpenseCheck) {
+          // For expense checks, set division and client to "Expenses"
+          divisionName = 'Expenses';
+          clientName = 'Expenses';
+        } else if (check.relationshipDetails && check.relationshipDetails.length > 0) {
           // Use the first client name instead of combining them
           clientName = check.relationshipDetails[0].clientName;
           
@@ -1413,6 +2037,27 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                            relationshipOtHours * relationshipOtRate +
                            relationshipHolidayHours * relationshipHolidayRate;
 
+        // Calculate PTO Amount
+        let ptoAmount = 0;
+        if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+          const relationship = check.relationshipDetails[0];
+          // For per diem employees, PTO is stored as a dollar amount
+          if (relationship.payType === 'perdiem' || relationship.payType === 'mixed') {
+            ptoAmount = (relationship as any).ptoAmount || 0;
+          } else {
+            // For hourly employees, calculate PTO amount from hours * rate
+            ptoAmount = relationshipHolidayHours * relationshipHolidayRate;
+          }
+        } else {
+          // For single client checks
+          if (check.payType === 'perdiem' || check.payType === 'mixed') {
+            ptoAmount = (check as any).ptoAmount || 0;
+          } else {
+            // For hourly employees, calculate PTO amount from hours * rate
+            ptoAmount = relationshipHolidayHours * relationshipHolidayRate;
+          }
+        }
+
         // Extract Other Pay data
         let otherPayDescription = '';
         let otherPayAmount = 0;
@@ -1432,11 +2077,14 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
 
         // Ensure amount is a number
         const amount = parseFloat(check.amount?.toString() || '0');
+        
+        // Calculate expenses amount
+        const expensesAmount = (check.isExpense || check.payType === 'expense') ? amount : 0;
 
         return {
           'Check Number': check.checkNumber || check.id,
           'Company': company?.name || 'Unknown Company',
-          'Employee': employee?.name || 'Unknown Employee',
+          'Employee': employee?.name || (check.isExpense ? (check.expenseName || 'Expense') : 'Unknown Employee'),
           'Client(s)': clientName,
           'Division': divisionName,
           'Pay Type': check.payType,
@@ -1447,9 +2095,9 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
           'Pay Rate': relationshipPayRate,
           'Overtime Hours': relationshipOtHours,
           'Overtime Rate': relationshipOtRate,
-          'Holiday Hours': relationshipHolidayHours,
-          'Holiday Rate': relationshipHolidayRate,
-          'Per Diem Amount': perdiemTotal,
+          'PTO Hours': relationshipHolidayHours,
+          'PTO Amount': ptoAmount > 0 ? `$${ptoAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '$0.00',
+          'Per Diem Amount': perdiemTotal > 0 ? `$${perdiemTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '$0.00',
           'Per Diem Breakdown': check.perdiemBreakdown ? 'Yes' : 'No',
           'Per Diem Monday': check.perdiemMonday || 0,
           'Per Diem Tuesday': check.perdiemTuesday || 0,
@@ -1460,10 +2108,27 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
           'Per Diem Sunday': check.perdiemSunday || 0,
           'Other Pay Description': otherPayDescription,
           'Other Pay Amount': otherPayAmount,
+          'Expenses': isExpenseCheck ? `$${expensesAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : 0,
+          'Expense Name': check.expenseName || '',
+          'Expense Description': check.expenseDescription || '',
           'Hourly Total': hourlyTotal,
-          'Total Amount': amount,
+          'Total Amount': `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
           'Memo': check.memo || ''
         };
+      });
+
+      // Sort reportData to group expense checks together (at the end)
+      const sortedReportData = [...reportData].sort((a, b) => {
+        const aIsExpense = a['Pay Type'] === 'expense' || a['Division'] === 'Expenses';
+        const bIsExpense = b['Pay Type'] === 'expense' || b['Division'] === 'Expenses';
+        
+        // If both are expenses or both are not expenses, maintain original order
+        if (aIsExpense === bIsExpense) {
+          return 0;
+        }
+        
+        // Put expenses at the end
+        return aIsExpense ? 1 : -1;
       });
 
       // Create workbook with multiple sheets using ExcelJS
@@ -1472,8 +2137,8 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
       // Main checks sheet with professional formatting
       const checksWorksheet = workbook.addWorksheet('Checks');
       
-      // Define columns from reportData keys
-      const headers = Object.keys(reportData[0] || {});
+      // Define columns from sortedReportData keys
+      const headers = Object.keys(sortedReportData[0] || {});
       checksWorksheet.columns = headers.map(header => ({
         header: header,
         key: header,
@@ -1481,7 +2146,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
       }));
       
       // Add data rows
-        reportData.forEach(row => {
+        sortedReportData.forEach(row => {
         checksWorksheet.addRow(row);
       });
       
@@ -1500,9 +2165,70 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         'Pay Rate': '',
         'Overtime Hours': '',
         'Overtime Rate': '',
-        'Holiday Hours': '',
-        'Holiday Rate': '',
-        'Per Diem Amount': '',
+        'PTO Hours': '',
+        'PTO Amount': (() => {
+          let totalPTO = 0;
+          dataToExport.forEach(check => {
+            if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+              const relationship = check.relationshipDetails[0];
+              if (relationship.payType === 'perdiem' || relationship.payType === 'mixed') {
+                totalPTO += (relationship as any).ptoAmount || 0;
+              } else {
+                const relHolidayHours = relationship.holidayHours || check.holidayHours || 0;
+                const relHolidayRate = check.holidayRate || (relationship.payRate || 0) * 2.0;
+                totalPTO += relHolidayHours * relHolidayRate;
+              }
+            } else {
+              if (check.payType === 'perdiem' || check.payType === 'mixed') {
+                totalPTO += (check as any).ptoAmount || 0;
+              } else {
+                const holidayHours = check.holidayHours || 0;
+                const holidayRate = check.holidayRate || (check.payRate || 0) * 2.0;
+                totalPTO += holidayHours * holidayRate;
+              }
+            }
+          });
+          return totalPTO > 0 ? `$${totalPTO.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '$0.00';
+        })(),
+        'Per Diem Amount': (() => {
+          let totalPerDiem = 0;
+          dataToExport.forEach(check => {
+            if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+              const relationship = check.relationshipDetails[0];
+              if (relationship.payType === 'perdiem' || relationship.payType === 'mixed') {
+                let perdiemTotal = 0;
+                const hasBreakdown = relationship.perdiemBreakdown !== undefined ? relationship.perdiemBreakdown : check.perdiemBreakdown;
+                if (hasBreakdown) {
+                  perdiemTotal = (relationship.perdiemMonday || check.perdiemMonday || 0) + 
+                               (relationship.perdiemTuesday || check.perdiemTuesday || 0) + 
+                               (relationship.perdiemWednesday || check.perdiemWednesday || 0) + 
+                               (relationship.perdiemThursday || check.perdiemThursday || 0) + 
+                               (relationship.perdiemFriday || check.perdiemFriday || 0) + 
+                               (relationship.perdiemSaturday || check.perdiemSaturday || 0) + 
+                               (relationship.perdiemSunday || check.perdiemSunday || 0);
+                } else {
+                  perdiemTotal = relationship.perdiemAmount || check.perdiemAmount || 0;
+                }
+                totalPerDiem += perdiemTotal;
+              }
+            } else {
+              if (check.payType === 'perdiem' || check.payType === 'mixed') {
+                let perdiemTotal = check.perdiemAmount || 0;
+                if (check.perdiemBreakdown) {
+                  perdiemTotal = (check.perdiemMonday || 0) + 
+                               (check.perdiemTuesday || 0) + 
+                               (check.perdiemWednesday || 0) + 
+                               (check.perdiemThursday || 0) + 
+                               (check.perdiemFriday || 0) + 
+                               (check.perdiemSaturday || 0) + 
+                               (check.perdiemSunday || 0);
+                }
+                totalPerDiem += perdiemTotal;
+              }
+            }
+          });
+          return totalPerDiem > 0 ? `$${totalPerDiem.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '$0.00';
+        })(),
         'Per Diem Breakdown': '',
         'Per Diem Monday': '',
         'Per Diem Tuesday': '',
@@ -1524,8 +2250,20 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
           }
           return sum + otherPayTotal;
         }, 0),
+        'Expenses': (() => {
+          const totalExpenses = dataToExport.reduce((sum, check) => {
+            const isExpense = check.isExpense || check.payType === 'expense';
+            return sum + (isExpense ? parseFloat(check.amount?.toString() || '0') : 0);
+          }, 0);
+          return totalExpenses > 0 ? `$${totalExpenses.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '';
+        })(),
+        'Expense Name': '',
+        'Expense Description': '',
         'Hourly Total': '',
-        'Total Amount': dataToExport.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0),
+        'Total Amount': (() => {
+          const total = calculateCorrectTotal(dataToExport);
+          return `$${total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        })(),
         'Memo': ''
       });
       
@@ -1550,13 +2288,25 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         companySummarySheet.addRow({
           company: report.company.name,
           totalChecks: report.totalChecks,
-          totalAmount: report.totalAmount,
+          totalAmount: `$${report.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
           active: report.company.active ? 'Yes' : 'No'
         });
       });
       
+      // Add total row
+      if (companyReports.length > 0) {
+        const totalChecks = companyReports.reduce((sum, report) => sum + report.totalChecks, 0);
+        const totalAmount = companyReports.reduce((sum, report) => sum + report.totalAmount, 0);
+        companySummarySheet.addRow({
+          company: 'TOTAL',
+          totalChecks: totalChecks,
+          totalAmount: `$${totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          active: ''
+        });
+      }
+      
       // Apply professional styling to company summary sheet
-      applyProfessionalStyling(companySummarySheet, false);
+      applyProfessionalStyling(companySummarySheet, true);
 
       // Client summary sheet - only for clients in dataToExport with checks
       const clientSummary = clients
@@ -1565,18 +2315,35 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
           check.clientId === client.id || 
           check.relationshipDetails?.some(rel => rel.clientId === client.id)
         );
-        const totalAmount = clientChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
+        const totalAmount = calculateCorrectTotal(clientChecks);
         const totalChecks = clientChecks.length;
         
         return {
           'Client': client.name,
           'Company': companies.find(c => c.id === clientChecks[0]?.companyId)?.name || 'Unknown',
           'Total Checks': totalChecks,
-          'Total Amount': totalAmount,
+          'Total Amount': `$${totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
           'Active': client.active ? 'Yes' : 'No'
         };
         })
         .filter(item => item['Total Checks'] > 0); // Only include clients with checks
+      
+      // Add Expenses row if there are expense checks
+      const expenseChecksForSummary = dataToExport.filter(check => check.isExpense || check.payType === 'expense');
+      if (expenseChecksForSummary.length > 0) {
+        const expenseTotal = calculateCorrectTotal(expenseChecksForSummary);
+        const expenseCompany = expenseChecksForSummary.length > 0 
+          ? companies.find(c => c.id === expenseChecksForSummary[0]?.companyId)?.name || 'Unknown'
+          : 'Unknown';
+        
+        clientSummary.push({
+          'Client': 'Expenses',
+          'Company': expenseCompany,
+          'Total Checks': expenseChecksForSummary.length,
+          'Total Amount': `$${expenseTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          'Active': 'N/A'
+        });
+      }
       
       const clientSummarySheet = workbook.addWorksheet('Client Summary');
       clientSummarySheet.columns = [
@@ -1587,7 +2354,24 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         { header: 'Active', key: 'Active', width: 10 }
       ];
       clientSummary.forEach(item => clientSummarySheet.addRow(item));
-      applyProfessionalStyling(clientSummarySheet, false);
+      
+      // Add total row
+      if (clientSummary.length > 0) {
+        const totalChecks = clientSummary.reduce((sum, item) => sum + item['Total Checks'], 0);
+        const totalAmount = clientSummary.reduce((sum, item) => {
+          const amountStr = item['Total Amount'].toString().replace(/[^0-9.-]/g, '');
+          return sum + parseFloat(amountStr || '0');
+        }, 0);
+        clientSummarySheet.addRow({
+          'Client': 'TOTAL',
+          'Company': '',
+          'Total Checks': totalChecks,
+          'Total Amount': `$${totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          'Active': ''
+        });
+      }
+      
+      applyProfessionalStyling(clientSummarySheet, true);
 
       // Company → Client → Division breakdown sheet - filter by selected company if provided
       let breakdownReports = generateCompanyReports();
@@ -1604,9 +2388,12 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
               'Client': client.clientName,
               'Division': division.divisionName,
               'Total Checks': division.totalChecks,
-              'Hourly Amount': division.hourlyAmount,
-              'Per Diem Amount': division.perdiemAmount,
-              'Total Amount': division.totalAmount
+              'Hourly Amount': `$${division.hourlyAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+              'Per Diem Amount': `$${division.perdiemAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+              'PTO Amount': `$${division.ptoAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+              'Other Amount': `$${division.otherPayAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+              'Expenses': `$${division.expensesAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+              'Total Amount': `$${division.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
             });
           });
         });
@@ -1620,24 +2407,74 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         { header: 'Total Checks', key: 'Total Checks', width: 15 },
         { header: 'Hourly Amount', key: 'Hourly Amount', width: 18 },
         { header: 'Per Diem Amount', key: 'Per Diem Amount', width: 18 },
+        { header: 'PTO Amount', key: 'PTO Amount', width: 18 },
+        { header: 'Other Amount', key: 'Other Amount', width: 18 },
+        { header: 'Expenses', key: 'Expenses', width: 18 },
         { header: 'Total Amount', key: 'Total Amount', width: 18 }
       ];
       breakdownData.forEach(item => breakdownSheet.addRow(item));
-      applyProfessionalStyling(breakdownSheet, false);
+      
+      // Add total row
+      if (breakdownData.length > 0) {
+        const totalChecks = breakdownData.reduce((sum, item) => sum + item['Total Checks'], 0);
+        const totalHourly = breakdownData.reduce((sum, item) => {
+          const amountStr = item['Hourly Amount'].toString().replace(/[^0-9.-]/g, '');
+          return sum + parseFloat(amountStr || '0');
+        }, 0);
+        const totalPerDiem = breakdownData.reduce((sum, item) => {
+          const amountStr = item['Per Diem Amount'].toString().replace(/[^0-9.-]/g, '');
+          return sum + parseFloat(amountStr || '0');
+        }, 0);
+        const totalPTO = breakdownData.reduce((sum, item) => {
+          const amountStr = item['PTO Amount'].toString().replace(/[^0-9.-]/g, '');
+          return sum + parseFloat(amountStr || '0');
+        }, 0);
+        const totalOther = breakdownData.reduce((sum, item) => {
+          const amountStr = item['Other Amount'].toString().replace(/[^0-9.-]/g, '');
+          return sum + parseFloat(amountStr || '0');
+        }, 0);
+        const totalExpenses = breakdownData.reduce((sum, item) => {
+          const amountStr = item['Expenses'].toString().replace(/[^0-9.-]/g, '');
+          return sum + parseFloat(amountStr || '0');
+        }, 0);
+        const totalAmount = breakdownData.reduce((sum, item) => {
+          const amountStr = item['Total Amount'].toString().replace(/[^0-9.-]/g, '');
+          return sum + parseFloat(amountStr || '0');
+        }, 0);
+        
+        breakdownSheet.addRow({
+          'Company': 'TOTAL',
+          'Client': '',
+          'Division': '',
+          'Total Checks': totalChecks,
+          'Hourly Amount': `$${totalHourly.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          'Per Diem Amount': `$${totalPerDiem.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          'PTO Amount': `$${totalPTO.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          'Other Amount': `$${totalOther.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          'Expenses': `$${totalExpenses.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          'Total Amount': `$${totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        });
+      }
+      
+      applyProfessionalStyling(breakdownSheet, true);
 
       // Employee summary sheet - only for employees in dataToExport with checks
       const employeeSummary = employees
         .filter(employee => !companyId || employee.companyId === companyId) // Filter by company if specified
         .map(employee => {
         const employeeChecks = dataToExport.filter(check => check.employeeId === employee.id);
-        const totalAmount = employeeChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
+        const totalAmount = calculateCorrectTotal(employeeChecks);
         const totalChecks = employeeChecks.length;
         
         return {
           'Employee': employee.name,
+          'Address': employee.address || 'N/A',
+          'Position': employee.position || 'N/A',
           'Company': companies.find(c => c.id === employee.companyId)?.name || 'Unknown',
+          'Role': employee.role || employee.position || 'N/A',
+          'Start Date': employee.startDate ? new Date(employee.startDate + 'T00:00:00').toLocaleDateString() : 'N/A',
           'Total Checks': totalChecks,
-          'Total Amount': totalAmount,
+          'Total Amount': `$${totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
           'Active': employee.active ? 'Yes' : 'No'
         };
         })
@@ -1646,13 +2483,126 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
       const employeeSummarySheet = workbook.addWorksheet('Employee Summary');
       employeeSummarySheet.columns = [
         { header: 'Employee', key: 'Employee', width: 25 },
+        { header: 'Address', key: 'Address', width: 30 },
+        { header: 'Position', key: 'Position', width: 20 },
         { header: 'Company', key: 'Company', width: 25 },
+        { header: 'Role', key: 'Role', width: 20 },
+        { header: 'Start Date', key: 'Start Date', width: 15 },
         { header: 'Total Checks', key: 'Total Checks', width: 15 },
         { header: 'Total Amount', key: 'Total Amount', width: 18 },
         { header: 'Active', key: 'Active', width: 10 }
       ];
       employeeSummary.forEach(item => employeeSummarySheet.addRow(item));
-      applyProfessionalStyling(employeeSummarySheet, false);
+      
+      // Add total row
+      if (employeeSummary.length > 0) {
+        const totalChecks = employeeSummary.reduce((sum, item) => sum + item['Total Checks'], 0);
+        const totalAmount = employeeSummary.reduce((sum, item) => {
+          const amountStr = item['Total Amount'].toString().replace(/[^0-9.-]/g, '');
+          return sum + parseFloat(amountStr || '0');
+        }, 0);
+        employeeSummarySheet.addRow({
+          'Employee': 'TOTAL',
+          'Address': '',
+          'Position': '',
+          'Company': '',
+          'Role': '',
+          'Start Date': '',
+          'Total Checks': totalChecks,
+          'Total Amount': `$${totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          'Active': ''
+        });
+      }
+      
+      applyProfessionalStyling(employeeSummarySheet, true);
+
+      // Expenses breakdown sheet - show expense checks grouped by company and division
+      const expenseChecks = dataToExport.filter(check => check.isExpense || check.payType === 'expense');
+      
+      if (expenseChecks.length > 0) {
+        // Group expenses by company and division
+        const expensesByCompany = new Map<string, {
+          company: string;
+          expenses: Array<{
+            checkNumber: string;
+            date: string;
+            expenseName: string;
+            description: string;
+            amount: number;
+            division: string;
+          }>;
+        }>();
+
+        expenseChecks.forEach(check => {
+          const company = companies.find(c => c.id === check.companyId);
+          const companyName = company?.name || 'Unknown Company';
+          const checkDate = check.date?.toDate ? check.date.toDate() : new Date(check.date);
+          
+          // Get division name (should be "Expenses" for expense checks)
+          const divisionName = getDivisionNameForRelationship(check);
+          
+          if (!expensesByCompany.has(companyName)) {
+            expensesByCompany.set(companyName, {
+              company: companyName,
+              expenses: []
+            });
+          }
+          
+          const companyData = expensesByCompany.get(companyName)!;
+          companyData.expenses.push({
+            checkNumber: String(check.checkNumber || check.id),
+            date: checkDate.toLocaleDateString(),
+            expenseName: check.expenseName || 'N/A',
+            description: check.expenseDescription || check.memo || 'N/A',
+            amount: parseFloat(check.amount?.toString() || '0'),
+            division: divisionName
+          });
+        });
+
+        const expensesSheet = workbook.addWorksheet('Expenses');
+        expensesSheet.columns = [
+          { header: 'Check Number', key: 'Check Number', width: 15 },
+          { header: 'Company', key: 'Company', width: 25 },
+          { header: 'Division', key: 'Division', width: 20 },
+          { header: 'Expense Name', key: 'Expense Name', width: 30 },
+          { header: 'Description', key: 'Description', width: 40 },
+          { header: 'Date', key: 'Date', width: 15 },
+          { header: 'Amount', key: 'Amount', width: 18 },
+          { header: 'Total Checks', key: 'Total Checks', width: 15 }
+        ];
+
+        // Add data grouped by company
+        expensesByCompany.forEach((companyData, companyName) => {
+          companyData.expenses.forEach(expense => {
+            expensesSheet.addRow({
+              'Check Number': expense.checkNumber,
+              'Company': companyName,
+              'Division': expense.division,
+              'Expense Name': expense.expenseName,
+              'Description': expense.description,
+              'Date': expense.date,
+              'Amount': `$${expense.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+              'Total Checks': 1
+            });
+          });
+        });
+
+        // Add total row
+        const totalExpenses = expenseChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
+        const totalExpenseChecks = expenseChecks.length;
+        expensesSheet.addRow({
+          'Check Number': 'TOTAL',
+          'Company': '',
+          'Division': '',
+          'Expense Name': '',
+          'Description': '',
+          'Date': '',
+          'Amount': `$${totalExpenses.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          'Total Checks': totalExpenseChecks
+        });
+
+        applyProfessionalStyling(expensesSheet, true);
+      }
 
       // Export the file using ExcelJS
       const buffer = await workbook.xlsx.writeBuffer();
@@ -1764,9 +2714,16 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
           cell.fill = {
             type: 'pattern',
             pattern: 'solid',
-            fgColor: { argb: 'FFE8F4FD' }
+            fgColor: { argb: 'FFFFFFFF' } // White background
           };
-          cell.alignment = { horizontal: 'left', vertical: 'middle' };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          // Black borders
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FF000000' } },
+            left: { style: 'thin', color: { argb: 'FF000000' } },
+            bottom: { style: 'thin', color: { argb: 'FF000000' } },
+            right: { style: 'thin', color: { argb: 'FF000000' } }
+          };
         });
       });
 
@@ -1796,8 +2753,330 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
   };
 
   const filteredChecks = getFilteredData();
-  const totalAmount = filteredChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
+  // Calculate total amount using the same logic as department breakdown for consistency
+  const totalAmount = (() => {
+    let totalHourly = 0;
+    let totalPerdiem = 0;
+    let totalPto = 0;
+    let totalOtherPay = 0;
+    let totalExpenses = 0;
+    
+    filteredChecks.forEach(check => {
+      if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+        check.relationshipDetails.forEach(rel => {
+          if (rel.payType === 'hourly' || rel.payType === 'mixed') {
+            const relHours = rel.hours || 0;
+            const relOtHours = rel.otHours || 0;
+            const relHolidayHours = rel.holidayHours || 0;
+            const relPayRate = rel.payRate || 0;
+            const otRate = check.overtimeRate || relPayRate * 1.5;
+            const holidayRate = check.holidayRate || relPayRate * 2.0;
+            
+            totalHourly += relHours * relPayRate + relOtHours * otRate + relHolidayHours * holidayRate;
+            
+            if (rel.otherPay && rel.otherPay.length > 0) {
+              const otherPayTotal = rel.otherPay.reduce((sum: number, item: any) => 
+                sum + parseFloat(item.amount || '0'), 0);
+              totalOtherPay += otherPayTotal;
+            }
+          }
+          
+          if (rel.payType === 'perdiem' || rel.payType === 'mixed') {
+            let perdiemTotal = 0;
+            const hasBreakdown = rel.perdiemBreakdown !== undefined ? rel.perdiemBreakdown : check.perdiemBreakdown;
+            if (hasBreakdown) {
+              perdiemTotal = (rel.perdiemMonday || check.perdiemMonday || 0) + 
+                           (rel.perdiemTuesday || check.perdiemTuesday || 0) + 
+                           (rel.perdiemWednesday || check.perdiemWednesday || 0) + 
+                           (rel.perdiemThursday || check.perdiemThursday || 0) + 
+                           (rel.perdiemFriday || check.perdiemFriday || 0) + 
+                           (rel.perdiemSaturday || check.perdiemSaturday || 0) + 
+                           (rel.perdiemSunday || check.perdiemSunday || 0);
+            } else {
+              perdiemTotal = rel.perdiemAmount || check.perdiemAmount || 0;
+            }
+            totalPerdiem += perdiemTotal;
+            
+            // Track PTO amount separately for per diem relationships
+            const relPtoAmount = (rel as any).ptoAmount || 0;
+            totalPto += relPtoAmount;
+            
+            // Track other pay separately for per diem relationships
+            if (rel.otherPay && rel.otherPay.length > 0) {
+              const otherPayTotal = rel.otherPay.reduce((sum: number, item: any) => 
+                sum + parseFloat(item.amount || '0'), 0);
+              totalOtherPay += otherPayTotal;
+            }
+          }
+        });
+      } else {
+        if (check.payType === 'hourly' || check.payType === 'mixed') {
+          const hourlyTotal = (check.hours || 0) * (check.payRate || 0) +
+                             (check.overtimeHours || 0) * (check.overtimeRate || 0) +
+                             (check.holidayHours || 0) * (check.holidayRate || 0);
+          totalHourly += hourlyTotal;
+          
+          if (check.otherPay && check.otherPay.length > 0) {
+            const otherPayTotal = check.otherPay.reduce((sum: number, item: any) => 
+              sum + parseFloat(item.amount || '0'), 0);
+            totalOtherPay += otherPayTotal;
+          }
+        }
+        
+        if (check.payType === 'perdiem' || check.payType === 'mixed') {
+          let perdiemTotal = check.perdiemAmount || 0;
+          if (check.perdiemBreakdown) {
+            perdiemTotal = (check.perdiemMonday || 0) + 
+                         (check.perdiemTuesday || 0) + 
+                         (check.perdiemWednesday || 0) + 
+                         (check.perdiemThursday || 0) + 
+                         (check.perdiemFriday || 0) + 
+                         (check.perdiemSaturday || 0) + 
+                         (check.perdiemSunday || 0);
+          }
+          totalPerdiem += perdiemTotal;
+          
+          // Track PTO amount separately (if stored at check level)
+          const checkPtoAmount = (check as any).ptoAmount || 0;
+          if (checkPtoAmount > 0) {
+            totalPto += checkPtoAmount;
+          }
+          
+          if (check.otherPay && check.otherPay.length > 0) {
+            const otherPayTotal = check.otherPay.reduce((sum: number, item: any) => 
+              sum + parseFloat(item.amount || '0'), 0);
+            totalOtherPay += otherPayTotal;
+          }
+        }
+      }
+      
+      if (check.isExpense || check.payType === 'expense') {
+        totalExpenses += parseFloat(check.amount?.toString() || '0');
+      }
+    });
+    
+    return totalHourly + totalPerdiem + totalPto + totalOtherPay + totalExpenses;
+  })();
   const companyReports = generateCompanyReports();
+
+  const getClientDepartmentStats = (client: Client): ClientDepartmentStats | null => {
+    const clientCheckIds = new Set<string>();
+    let hourlyAmount = 0;
+    let perdiemAmount = 0;
+    let ptoAmount = 0;
+    let otherPayAmount = 0;
+    let representativeCompanyId: string | undefined;
+    const companyIdsForClient = new Set<string>();
+    
+    // First, include company IDs from client.companyIds if available (this is the primary source)
+    if (client.companyIds && client.companyIds.length > 0) {
+      client.companyIds.forEach(cid => companyIdsForClient.add(cid));
+    }
+    
+    // Also find company IDs from checks that match this client (as fallback)
+    filteredChecks.forEach(check => {
+      const isDirectMatch = check.clientId === client.id;
+      const matchingRelationships = check.relationshipDetails?.filter(rel => rel.clientId === client.id) || [];
+      
+      if (isDirectMatch || matchingRelationships.length > 0) {
+        companyIdsForClient.add(check.companyId);
+        representativeCompanyId = representativeCompanyId || check.companyId;
+      }
+    });
+
+    filteredChecks.forEach(check => {
+      const isDirectMatch = check.clientId === client.id;
+      const matchingRelationships = check.relationshipDetails?.filter(rel => rel.clientId === client.id) || [];
+      
+      // Check if this is an expense check - exclude expenses from individual departments
+      const isExpenseCheck = check.isExpense || check.payType === 'expense';
+      
+      // Skip expense checks - they will be shown as a separate row
+      if (isExpenseCheck) {
+        return;
+      }
+
+      // For non-expense checks, require direct match or relationships
+      if (!isDirectMatch && matchingRelationships.length === 0) {
+        return;
+      }
+
+      representativeCompanyId = representativeCompanyId || check.companyId;
+      clientCheckIds.add(check.id);
+      
+      if (matchingRelationships.length > 0) {
+        matchingRelationships.forEach(rel => {
+          if (rel.payType === 'hourly') {
+            const relHours = rel.hours || check.hours || 0;
+            const relOtHours = rel.otHours || check.otHours || 0;
+            const relHolidayHours = rel.holidayHours || check.holidayHours || 0;
+            const relPayRate = rel.payRate || 0;
+
+            const regularPay = relHours * relPayRate;
+            const otPay = relOtHours * relPayRate * 1.5;
+            const holidayPay = relHolidayHours * relPayRate * 2.0;
+
+            hourlyAmount += regularPay + otPay + holidayPay;
+
+            // Track other pay separately
+            if (rel.otherPay && rel.otherPay.length > 0) {
+              otherPayAmount += rel.otherPay.reduce((sum, item) => sum + parseFloat(item.amount || '0'), 0);
+            }
+          } else if (rel.payType === 'perdiem') {
+            let relPerdiemTotal = 0;
+            const hasBreakdown = rel.perdiemBreakdown !== undefined ? rel.perdiemBreakdown : check.perdiemBreakdown;
+            if (hasBreakdown) {
+              relPerdiemTotal = (rel.perdiemMonday || check.perdiemMonday || 0) +
+                               (rel.perdiemTuesday || check.perdiemTuesday || 0) +
+                               (rel.perdiemWednesday || check.perdiemWednesday || 0) +
+                               (rel.perdiemThursday || check.perdiemThursday || 0) +
+                               (rel.perdiemFriday || check.perdiemFriday || 0) +
+                               (rel.perdiemSaturday || check.perdiemSaturday || 0) +
+                               (rel.perdiemSunday || check.perdiemSunday || 0);
+            } else {
+              relPerdiemTotal = rel.perdiemAmount || check.perdiemAmount || 0;
+            }
+            perdiemAmount += relPerdiemTotal;
+            
+            // Track PTO amount separately for per diem employees
+            const relPtoAmount = (rel as any).ptoAmount || 0;
+            ptoAmount += relPtoAmount;
+            
+            // Track other pay separately for per diem relationships
+            if (rel.otherPay && rel.otherPay.length > 0) {
+              otherPayAmount += rel.otherPay.reduce((sum, item) => sum + parseFloat(item.amount || '0'), 0);
+            }
+          }
+        });
+      } else if (isDirectMatch) {
+        if (check.payType === 'hourly' || check.payType === 'mixed') {
+          const hourlyTotal = (check.hours || 0) * (check.payRate || 0) +
+                             (check.overtimeHours || 0) * (check.overtimeRate || 0) +
+                             (check.holidayHours || 0) * (check.holidayRate || 0);
+          hourlyAmount += hourlyTotal;
+
+          // Track other pay separately
+          if (check.otherPay && check.otherPay.length > 0) {
+            otherPayAmount += check.otherPay.reduce((sum, item) => sum + parseFloat(item.amount || '0'), 0);
+          }
+        }
+
+        if (check.payType === 'perdiem' || check.payType === 'mixed') {
+          let perdiemTotal = check.perdiemAmount || 0;
+          if (check.perdiemBreakdown) {
+            perdiemTotal = (check.perdiemMonday || 0) +
+                          (check.perdiemTuesday || 0) +
+                          (check.perdiemWednesday || 0) +
+                          (check.perdiemThursday || 0) +
+                          (check.perdiemFriday || 0) +
+                          (check.perdiemSaturday || 0) +
+                          (check.perdiemSunday || 0);
+          }
+          perdiemAmount += perdiemTotal;
+          
+          // Track PTO amount separately (if stored at check level)
+          const checkPtoAmount = (check as any).ptoAmount || 0;
+          if (checkPtoAmount > 0) {
+            ptoAmount += checkPtoAmount;
+          }
+          
+          // Track other pay separately
+          if (check.otherPay && check.otherPay.length > 0) {
+            otherPayAmount += check.otherPay.reduce((sum, item) => sum + parseFloat(item.amount || '0'), 0);
+          }
+        }
+      }
+    });
+
+    // Only return if there are checks for this client (expenses are handled separately)
+    if (clientCheckIds.size === 0) {
+      return null;
+    }
+
+    // Find company name - use first companyId from companyIdsForClient if representativeCompanyId is not set
+    let companyIdToUse = representativeCompanyId;
+    if (!companyIdToUse && companyIdsForClient.size > 0) {
+      companyIdToUse = Array.from(companyIdsForClient)[0];
+    }
+    const company = companies.find(c => c.id === companyIdToUse);
+
+    return {
+      clientId: client.id,
+      clientName: client.name,
+      companyName: company?.name || 'Unknown',
+      totalChecks: clientCheckIds.size,
+      hourlyAmount,
+      perdiemAmount,
+      ptoAmount,
+      otherPayAmount,
+      expensesAmount: 0, // Expenses are shown as a separate row
+      totalAmount: hourlyAmount + perdiemAmount + ptoAmount + otherPayAmount,
+      isActive: client.active
+    };
+  };
+
+  const buildClientDepartmentStats = (clientList: Client[]) => {
+    const departmentStats = clientList
+      .map(client => getClientDepartmentStats(client))
+      .filter((stat): stat is ClientDepartmentStats => !!stat);
+    
+    // Calculate total expenses from all filtered checks
+    const totalExpenses = filteredChecks
+      .filter(check => check.isExpense || check.payType === 'expense')
+      .reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
+    
+    // Get expense check count
+    const expenseCheckCount = filteredChecks.filter(check => check.isExpense || check.payType === 'expense').length;
+    
+    // Find the most common company for expenses (for display purposes)
+    const expenseCompanyIds = filteredChecks
+      .filter(check => check.isExpense || check.payType === 'expense')
+      .map(check => check.companyId);
+    const companyCounts = expenseCompanyIds.reduce((acc, id) => {
+      acc[id] = (acc[id] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+    const mostCommonCompanyId = Object.keys(companyCounts).reduce((a, b) => 
+      companyCounts[a] > companyCounts[b] ? a : b, expenseCompanyIds[0] || '');
+    const expenseCompany = companies.find(c => c.id === mostCommonCompanyId);
+    
+    // Add expenses as a separate row if there are any expenses
+    if (totalExpenses > 0) {
+      const expensesRow: ClientDepartmentStats = {
+        clientId: 'expenses',
+        clientName: 'Expenses',
+        companyName: expenseCompany?.name || 'Multiple Companies',
+        totalChecks: expenseCheckCount,
+        hourlyAmount: 0,
+        perdiemAmount: 0,
+        ptoAmount: 0,
+        otherPayAmount: 0,
+        expensesAmount: totalExpenses,
+        totalAmount: totalExpenses,
+        isActive: true
+      };
+      departmentStats.push(expensesRow);
+    }
+    
+    return departmentStats;
+  };
+
+  const visibleClientStats = buildClientDepartmentStats(
+    clients.filter(client => filters.includeInactive || client.active)
+  );
+
+  const departmentTotals = visibleClientStats.reduce(
+    (acc, stat) => ({
+      totalChecks: acc.totalChecks + stat.totalChecks,
+      hourlyAmount: acc.hourlyAmount + stat.hourlyAmount,
+      perdiemAmount: acc.perdiemAmount + stat.perdiemAmount,
+      ptoAmount: acc.ptoAmount + stat.ptoAmount,
+      otherPayAmount: acc.otherPayAmount + stat.otherPayAmount,
+      expensesAmount: acc.expensesAmount + stat.expensesAmount,
+      totalAmount: acc.totalAmount + stat.totalAmount
+    }),
+    { totalChecks: 0, hourlyAmount: 0, perdiemAmount: 0, ptoAmount: 0, otherPayAmount: 0, expensesAmount: 0, totalAmount: 0 }
+  );
 
   if (loading) {
     return (
@@ -1967,6 +3246,11 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
             label="Employee Info Report" 
             iconPosition="start"
           />
+          <Tab 
+            icon={<Receipt />} 
+            label="Expenses" 
+            iconPosition="start"
+          />
         </Tabs>
 
         {/* Company Reports Tab */}
@@ -2031,7 +3315,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                 <AccordionDetails>
                   <Box sx={{ mb: 3 }}>
                     <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
-                      Deparment Breakdown
+                      Deparment Breakdown {filters.companyId ? ` For ${companies.find(c => c.id === filters.companyId)?.name || 'Company'}` : ''}
                     </Typography>
                     <TableContainer>
                       <Table size="small">
@@ -2041,6 +3325,9 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                             <TableCell align="right"><strong>Checks</strong></TableCell>
                             <TableCell align="right"><strong>Hourly Amount</strong></TableCell>
                             <TableCell align="right"><strong>Per Diem Amount</strong></TableCell>
+                            <TableCell align="right"><strong>PTO Amount</strong></TableCell>
+                            <TableCell align="right"><strong>Other Amount</strong></TableCell>
+                            <TableCell align="right"><strong>Expenses</strong></TableCell>
                             <TableCell align="right"><strong>Total Amount</strong></TableCell>
                           </TableRow>
                         </TableHead>
@@ -2057,6 +3344,9 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                                   <TableCell align="right" sx={{ fontWeight: 'bold' }}>{client.totalChecks}</TableCell>
                                   <TableCell align="right" sx={{ fontWeight: 'bold' }}>${client.hourlyAmount.toLocaleString()}</TableCell>
                                   <TableCell align="right" sx={{ fontWeight: 'bold' }}>${client.perdiemAmount.toLocaleString()}</TableCell>
+                                  <TableCell align="right" sx={{ fontWeight: 'bold' }}>${client.ptoAmount.toLocaleString()}</TableCell>
+                                  <TableCell align="right" sx={{ fontWeight: 'bold' }}>${client.otherPayAmount.toLocaleString()}</TableCell>
+                                  <TableCell align="right" sx={{ fontWeight: 'bold' }}>${client.expensesAmount.toLocaleString()}</TableCell>
                                   <TableCell align="right" sx={{ fontWeight: 'bold', color: '#1976d2' }}>${client.totalAmount.toLocaleString()}</TableCell>
                                 </TableRow>
                                 
@@ -2080,6 +3370,9 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                                     <TableCell align="right">{division.totalChecks}</TableCell>
                                     <TableCell align="right">${division.hourlyAmount.toLocaleString()}</TableCell>
                                     <TableCell align="right">${division.perdiemAmount.toLocaleString()}</TableCell>
+                                    <TableCell align="right">${division.ptoAmount.toLocaleString()}</TableCell>
+                                    <TableCell align="right">${division.otherPayAmount.toLocaleString()}</TableCell>
+                                    <TableCell align="right">${division.expensesAmount.toLocaleString()}</TableCell>
                                     <TableCell align="right">${division.totalAmount.toLocaleString()}</TableCell>
                                   </TableRow>
                                 ))}
@@ -2106,6 +3399,21 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                             </TableCell>
                             <TableCell align="right">
                               <strong>
+                                ${report.clientBreakdown.reduce((sum, client) => sum + client.ptoAmount, 0).toLocaleString()}
+                              </strong>
+                            </TableCell>
+                            <TableCell align="right">
+                              <strong>
+                                ${report.clientBreakdown.reduce((sum, client) => sum + client.otherPayAmount, 0).toLocaleString()}
+                              </strong>
+                            </TableCell>
+                            <TableCell align="right">
+                              <strong>
+                                ${report.clientBreakdown.reduce((sum, client) => sum + client.expensesAmount, 0).toLocaleString()}
+                              </strong>
+                            </TableCell>
+                            <TableCell align="right">
+                              <strong>
                                 ${report.clientBreakdown.reduce((sum, client) => sum + client.totalAmount, 0).toLocaleString()}
                               </strong>
                             </TableCell>
@@ -2124,7 +3432,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
         {selectedTab === 1 && (
           <Box>
             <Typography variant="h6" gutterBottom>
-               Department Breakdown
+               Department Breakdown{filters.companyId ? ` For ${companies.find(c => c.id === filters.companyId)?.name || 'Company'}` : ''}
             </Typography>
             
             {/* Client Filter Controls */}
@@ -2141,9 +3449,10 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                 />
                 <Typography variant="body2" color="text.secondary">
                   {(() => {
-                    const activeClients = clients.filter(client => client.active).length;
-                    const inactiveClients = clients.filter(client => !client.active).length;
-                    return `Showing ${filters.includeInactive ? activeClients + inactiveClients : activeClients} of ${clients.length} deparments`;
+                    // Exclude expenses row from department count
+                    const totalDepartments = visibleClientStats.filter(stat => stat.clientId !== 'expenses').length;
+                    const allDepartments = clients.length;
+                    return `Showing ${totalDepartments} of ${allDepartments} departments`;
                   })()}
                 </Typography>
               </Box>
@@ -2166,75 +3475,44 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                     <TableCell align="right">Total Checks</TableCell>
                     <TableCell align="right">Hourly Amount</TableCell>
                     <TableCell align="right">Per Diem Amount</TableCell>
+                    <TableCell align="right">PTO Amount</TableCell>
+                    <TableCell align="right">Other Amount</TableCell>
+                    <TableCell align="right">Expenses</TableCell>
                     <TableCell align="right">Total Amount</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {(() => {
-                    console.log('🔍 DEBUG: Rendering client breakdown TableBody, clients:', clients);
+                    logger.log('🔍 DEBUG: Rendering client breakdown TableBody, clients:', clients);
                     return null;
                   })()}
-                  {clients
-                    .filter(client => filters.includeInactive || client.active)
-                    .map((client) => {
-                    console.log('🔍 DEBUG: Processing client:', client.id, client.name);
-                    const clientChecks = filteredChecks.filter(check => 
-                      check.clientId === client.id || 
-                      check.relationshipDetails?.some(rel => rel.clientId === client.id)
-                    );
-                    
-                    if (clientChecks.length === 0) {
-                      console.log('🔍 DEBUG: Client has no checks, returning null:', client.id);
-                      return null;
-                    }
-                    
-                    const totalAmount = clientChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
-                    const totalChecks = clientChecks.length;
-                    
-                    // Calculate hourly vs per diem amounts
-                    let hourlyAmount = 0;
-                    let perdiemAmount = 0;
-                    
-                    clientChecks.forEach(check => {
-                      if (check.payType === 'hourly' || check.payType === 'mixed') {
-                        const hourlyTotal = (check.hours || 0) * (check.payRate || 0) +
-                                           (check.overtimeHours || 0) * (check.overtimeRate || 0) +
-                                           (check.holidayHours || 0) * (check.holidayRate || 0);
-                        hourlyAmount += hourlyTotal;
-                      }
-                      
-                      if (check.payType === 'perdiem' || check.payType === 'mixed') {
-                        let perdiemTotal = check.perdiemAmount || 0;
-                        if (check.perdiemBreakdown) {
-                          perdiemTotal = (check.perdiemMonday || 0) + 
-                                        (check.perdiemTuesday || 0) + 
-                                        (check.perdiemWednesday || 0) + 
-                                        (check.perdiemThursday || 0) + 
-                                        (check.perdiemFriday || 0) + 
-                                        (check.perdiemSaturday || 0) + 
-                                        (check.perdiemSunday || 0);
-                        }
-                        perdiemAmount += perdiemTotal;
-                      }
-                    });
-
-                    const company = companies.find(c => c.id === clientChecks[0]?.companyId);
-                    
+                  {visibleClientStats.map((stat) => {
+                    const isExpensesRow = stat.clientId === 'expenses';
                     return (
-                      <TableRow key={client.id} sx={{ opacity: client.active ? 1 : 0.7 }}>
+                      <TableRow 
+                        key={stat.clientId} 
+                        sx={{ 
+                          opacity: stat.isActive ? 1 : 0.7,
+                          backgroundColor: isExpensesRow ? '#fafafa' : 'transparent',
+                          borderLeft: isExpensesRow ? '4px solid #1976d2' : 'none'
+                        }}
+                      >
                         <TableCell>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <Box
-                              sx={{
-                                width: 8,
-                                height: 8,
-                                borderRadius: '50%',
-                                backgroundColor: client.active ? '#4caf50' : '#f44336',
-                                flexShrink: 0
-                              }}
-                            />
-                            {client.name}
-                            {!client.active && (
+                            {!isExpensesRow && (
+                              <Box
+                                sx={{
+                                  width: 8,
+                                  height: 8,
+                                  borderRadius: '50%',
+                                  backgroundColor: stat.isActive ? '#4caf50' : '#f44336',
+                                  flexShrink: 0
+                                }}
+                              />
+                            )}
+                            {isExpensesRow && <span style={{ marginRight: 4 }}>→</span>}
+                            {stat.clientName}
+                            {!stat.isActive && !isExpensesRow && (
                               <Chip 
                                 label="Inactive" 
                                 size="small" 
@@ -2245,94 +3523,55 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                             )}
                           </Box>
                         </TableCell>
-                        <TableCell>{company?.name || 'Unknown'}</TableCell>
-                        <TableCell align="right">{totalChecks}</TableCell>
-                        <TableCell align="right">${hourlyAmount.toLocaleString()}</TableCell>
-                        <TableCell align="right">${perdiemAmount.toLocaleString()}</TableCell>
-                        <TableCell align="right">${totalAmount.toLocaleString()}</TableCell>
+                        <TableCell>{stat.companyName}</TableCell>
+                        <TableCell align="right">{stat.totalChecks}</TableCell>
+                        <TableCell align="right">${stat.hourlyAmount.toLocaleString()}</TableCell>
+                        <TableCell align="right">${stat.perdiemAmount.toLocaleString()}</TableCell>
+                        <TableCell align="right">${stat.ptoAmount.toLocaleString()}</TableCell>
+                        <TableCell align="right">${stat.otherPayAmount.toLocaleString()}</TableCell>
+                        <TableCell align="right">${stat.expensesAmount.toLocaleString()}</TableCell>
+                        <TableCell align="right">${stat.totalAmount.toLocaleString()}</TableCell>
                       </TableRow>
                     );
-                  })
-                    .filter(Boolean)}
+                  })}
                   
-                  {/* Total Row */}
+                  {/* Total Row - Sum unique checks only once */}
                   <TableRow key="client-breakdown-total" sx={{ backgroundColor: '#f5f5f5', fontWeight: 'bold' }}>
                     <TableCell><strong>TOTAL</strong></TableCell>
                     <TableCell></TableCell>
                     <TableCell align="right">
                       <strong>
-                        {clients
-                          .filter(client => filters.includeInactive || client.active)
-                          .reduce((sum, client) => {
-                          const clientChecks = filteredChecks.filter(check => 
-                            check.clientId === client.id || 
-                            check.relationshipDetails?.some(rel => rel.clientId === client.id)
-                          );
-                          return sum + clientChecks.length;
-                        }, 0)}
+                        {filteredChecks.length}
                       </strong>
                     </TableCell>
                     <TableCell align="right">
                       <strong>
-                        ${clients
-                          .filter(client => filters.includeInactive || client.active)
-                          .reduce((sum, client) => {
-                          const clientChecks = filteredChecks.filter(check => 
-                            check.clientId === client.id || 
-                            check.relationshipDetails?.some(rel => rel.clientId === client.id)
-                          );
-                          let hourlyTotal = 0;
-                          clientChecks.forEach(check => {
-                            if (check.payType === 'hourly' || check.payType === 'mixed') {
-                              hourlyTotal += (check.hours || 0) * (check.payRate || 0) +
-                                            (check.overtimeHours || 0) * (check.overtimeRate || 0) +
-                                            (check.holidayHours || 0) * (check.holidayRate || 0);
-                            }
-                          });
-                          return sum + hourlyTotal;
-                        }, 0).toLocaleString()}
+                        ${departmentTotals.hourlyAmount.toLocaleString()}
                       </strong>
                     </TableCell>
                     <TableCell align="right">
                       <strong>
-                        ${clients
-                          .filter(client => filters.includeInactive || client.active)
-                          .reduce((sum, client) => {
-                          const clientChecks = filteredChecks.filter(check => 
-                            check.clientId === client.id || 
-                            check.relationshipDetails?.some(rel => rel.clientId === client.id)
-                          );
-                          let perdiemTotal = 0;
-                          clientChecks.forEach(check => {
-                            if (check.payType === 'perdiem' || check.payType === 'mixed') {
-                              let checkPerdiem = check.perdiemAmount || 0;
-                              if (check.perdiemBreakdown) {
-                                checkPerdiem = (check.perdiemMonday || 0) + 
-                                              (check.perdiemTuesday || 0) + 
-                                              (check.perdiemWednesday || 0) + 
-                                              (check.perdiemThursday || 0) + 
-                                              (check.perdiemFriday || 0) + 
-                                              (check.perdiemSaturday || 0) + 
-                                              (check.perdiemSunday || 0);
-                              }
-                              perdiemTotal += checkPerdiem;
-                            }
-                          });
-                          return sum + perdiemTotal;
-                        }, 0).toLocaleString()}
+                        ${departmentTotals.perdiemAmount.toLocaleString()}
                       </strong>
                     </TableCell>
                     <TableCell align="right">
                       <strong>
-                        ${clients
-                          .filter(client => filters.includeInactive || client.active)
-                          .reduce((sum, client) => {
-                          const clientChecks = filteredChecks.filter(check => 
-                            check.clientId === client.id || 
-                            check.relationshipDetails?.some(rel => rel.clientId === client.id)
-                          );
-                          return sum + clientChecks.reduce((checkSum, check) => checkSum + parseFloat(check.amount?.toString() || '0'), 0);
-                        }, 0).toLocaleString()}
+                        ${departmentTotals.ptoAmount.toLocaleString()}
+                      </strong>
+                    </TableCell>
+                    <TableCell align="right">
+                      <strong>
+                        ${departmentTotals.otherPayAmount.toLocaleString()}
+                      </strong>
+                    </TableCell>
+                    <TableCell align="right">
+                      <strong>
+                        ${departmentTotals.expensesAmount.toLocaleString()}
+                      </strong>
+                    </TableCell>
+                    <TableCell align="right">
+                      <strong>
+                        ${departmentTotals.totalAmount.toLocaleString()}
                       </strong>
                     </TableCell>
                   </TableRow>
@@ -2351,7 +3590,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
             
             {/* Company Selector and Export Controls */}
             <Box sx={{ mb: 3, display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
+              <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
                 <FormControl sx={{ minWidth: 200 }}>
                   <InputLabel>Select Company</InputLabel>
                   <Select
@@ -2367,16 +3606,35 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                     ))}
                   </Select>
                 </FormControl>
+                <TextField
+                  placeholder="Search employees..."
+                  value={employeeSearchTerm}
+                  onChange={(e) => setEmployeeSearchTerm(e.target.value)}
+                  sx={{ minWidth: 250 }}
+                  size="small"
+                  InputProps={{
+                    startAdornment: <FilterList sx={{ mr: 1, color: 'text.secondary' }} />
+                  }}
+                />
                 <Typography variant="body2" color="text.secondary">
                   {(() => {
                     const filteredEmployees = employees.filter(employee => {
                       if (selectedCompanyForEmployees === 'all') return true;
                       return employee.companyId === selectedCompanyForEmployees;
                     });
-                    const employeesWithChecks = filteredEmployees.filter(employee => 
-                      filteredChecks.some(check => check.employeeId === employee.id)
-                    );
-                    return `Showing ${employeesWithChecks.length} employees`;
+                    // Show all employees, even if they have no checks
+                    const searchLower = employeeSearchTerm.toLowerCase();
+                    const filteredBySearch = filteredEmployees.filter(employee => {
+                      if (!searchLower) return true;
+                      return (
+                        employee.name.toLowerCase().includes(searchLower) ||
+                        (employee.address && employee.address.toLowerCase().includes(searchLower)) ||
+                        (employee.position && employee.position.toLowerCase().includes(searchLower)) ||
+                        (employee.role && employee.role.toLowerCase().includes(searchLower)) ||
+                        (companies.find(c => c.id === employee.companyId)?.name || '').toLowerCase().includes(searchLower)
+                      );
+                    });
+                    return `Showing ${filteredBySearch.length} employees`;
                   })()}
                 </Typography>
               </Box>
@@ -2428,28 +3686,33 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                             if (selectedCompanyForEmployees === 'all') return true;
                             return employee.companyId === selectedCompanyForEmployees;
                           });
-                          return filteredEmployees.filter(employee => 
-                            filteredChecks.some(check => check.employeeId === employee.id)
-                          ).length;
+                          // Count all employees, not just those with checks
+                          return filteredEmployees.length;
                         })()}
                         checked={selectedEmployees.size > 0 && selectedEmployees.size === (() => {
                           const filteredEmployees = employees.filter(employee => {
                             if (selectedCompanyForEmployees === 'all') return true;
                             return employee.companyId === selectedCompanyForEmployees;
                           });
-                          return filteredEmployees.filter(employee => 
-                            filteredChecks.some(check => check.employeeId === employee.id)
-                          ).length;
+                          // Count all employees, not just those with checks
+                          return filteredEmployees.length;
                         })()}
                         onChange={toggleSelectAllEmployees}
                       />
                     </TableCell>
                     <TableCell>Employee</TableCell>
+                    <TableCell>Address</TableCell>
+                    <TableCell>Position</TableCell>
                     <TableCell>Company</TableCell>
                     <TableCell>Role</TableCell>
+                    <TableCell>Start Date</TableCell>
                     <TableCell align="right">Total Checks</TableCell>
+                    <TableCell align="right">Regular Hrs</TableCell>
+                    <TableCell align="right">OT Hrs</TableCell>
+                    <TableCell align="right">PTO Hrs</TableCell>
+                    <TableCell align="right">Per Diem</TableCell>
+                    <TableCell align="right">Other Pay</TableCell>
                     <TableCell align="right">Total Amount</TableCell>
-                    <TableCell align="right">Average per Check</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -2460,25 +3723,79 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                       return employee.companyId === selectedCompanyForEmployees;
                     });
                     
-                    return filteredEmployees
+                    // Filter by search term
+                    const searchLower = employeeSearchTerm.toLowerCase();
+                    const filteredBySearch = filteredEmployees.filter(employee => {
+                      if (!searchLower) return true;
+                      return (
+                        employee.name.toLowerCase().includes(searchLower) ||
+                        (employee.address && employee.address.toLowerCase().includes(searchLower)) ||
+                        (employee.position && employee.position.toLowerCase().includes(searchLower)) ||
+                        (employee.role && employee.role.toLowerCase().includes(searchLower)) ||
+                        (companies.find(c => c.id === employee.companyId)?.name || '').toLowerCase().includes(searchLower)
+                      );
+                    });
+                    
+                    return filteredBySearch
                       .map((employee) => {
                         const employeeChecks = filteredChecks.filter(check => check.employeeId === employee.id);
                         
-                        if (employeeChecks.length === 0) return null;
+                        // Show all employees, even if they have no checks (they'll show 0 values)
                         
                         const totalAmount = employeeChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
                         const totalChecks = employeeChecks.length;
-                        const averagePerCheck = totalChecks > 0 ? totalAmount / totalChecks : 0;
+                        
+                        // Calculate hours and pay breakdown
+                        let totalRegularHours = 0;
+                        let totalOtHours = 0;
+                        let totalHolidayHours = 0;
+                        let totalPerDiem = 0;
+                        let totalOtherPay = 0;
+                        
+                        employeeChecks.forEach(check => {
+                          // Handle relationship-specific data
+                          if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+                            check.relationshipDetails.forEach(rel => {
+                              totalRegularHours += rel.hours || 0;
+                              totalOtHours += rel.otHours || 0;
+                              totalHolidayHours += rel.holidayHours || 0;
+                              totalPerDiem += rel.perdiemAmount || 0;
+                              if (rel.otherPay) {
+                                rel.otherPay.forEach(op => {
+                                  totalOtherPay += parseFloat(op.amount || '0');
+                                });
+                              }
+                            });
+                          } else {
+                            // Fallback to check-level data
+                            totalRegularHours += check.hours || 0;
+                            totalOtHours += (check.otHours || check.overtimeHours || 0);
+                            totalHolidayHours += check.holidayHours || 0;
+                            totalPerDiem += check.perdiemAmount || 0;
+                            if (check.otherPay) {
+                              check.otherPay.forEach(op => {
+                                totalOtherPay += parseFloat(op.amount || '0');
+                              });
+                            }
+                          }
+                        });
                         
                         const company = companies.find(c => c.id === employee.companyId);
                         
                         return {
                           employee,
+                          address: employee.address || 'N/A',
+                          position: employee.position || 'N/A',
                           company: company?.name || 'Unknown',
-                        role: employee.role || employee.position || employee.payType || 'N/A',
+                          role: employee.role || employee.position || employee.payType || 'N/A',
+                          startDate: employee.startDate ? new Date(employee.startDate + 'T00:00:00').toLocaleDateString() : 'N/A',
                           totalAmount,
                           totalChecks,
-                          averagePerCheck
+                          totalRegularHours,
+                          totalOtHours,
+                          totalHolidayHours,
+                          totalPerDiem,
+                          totalOtherPay
                         };
                       })
                       .filter(Boolean)
@@ -2509,13 +3826,133 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                             />
                           </TableCell>
                           <TableCell>{item!.employee.name}</TableCell>
+                          <TableCell>{item!.address}</TableCell>
+                          <TableCell>{item!.position}</TableCell>
                           <TableCell>{item!.company}</TableCell>
                           <TableCell>{item!.role}</TableCell>
+                          <TableCell>{item!.startDate}</TableCell>
                           <TableCell align="right">{item!.totalChecks}</TableCell>
+                          <TableCell align="right">{item!.totalRegularHours.toFixed(2)}</TableCell>
+                          <TableCell align="right">{item!.totalOtHours.toFixed(2)}</TableCell>
+                          <TableCell align="right">{item!.totalHolidayHours.toFixed(2)}</TableCell>
+                          <TableCell align="right">${item!.totalPerDiem.toFixed(2)}</TableCell>
+                          <TableCell align="right">${item!.totalOtherPay.toFixed(2)}</TableCell>
                           <TableCell align="right">${item!.totalAmount.toLocaleString()}</TableCell>
-                          <TableCell align="right">${item!.averagePerCheck.toFixed(2)}</TableCell>
                         </TableRow>
                       ));
+                  })()}
+                  {/* Total Row */}
+                  {(() => {
+                    const filteredEmployees = employees.filter(employee => {
+                      if (selectedCompanyForEmployees === 'all') return true;
+                      return employee.companyId === selectedCompanyForEmployees;
+                    });
+                    
+                    const searchLower = employeeSearchTerm.toLowerCase();
+                    const filteredBySearch = filteredEmployees.filter(employee => {
+                      if (!searchLower) return true;
+                      return (
+                        employee.name.toLowerCase().includes(searchLower) ||
+                        (employee.address && employee.address.toLowerCase().includes(searchLower)) ||
+                        (employee.position && employee.position.toLowerCase().includes(searchLower)) ||
+                        (employee.role && employee.role.toLowerCase().includes(searchLower)) ||
+                        (companies.find(c => c.id === employee.companyId)?.name || '').toLowerCase().includes(searchLower)
+                      );
+                    });
+                    
+                    const employeesWithData = filteredBySearch
+                      .map((employee) => {
+                        const employeeChecks = filteredChecks.filter(check => check.employeeId === employee.id);
+                        // Show all employees, even if they have no checks (they'll show 0 values)
+                        
+                        let totalRegularHours = 0;
+                        let totalOtHours = 0;
+                        let totalHolidayHours = 0;
+                        let totalPerDiem = 0;
+                        let totalOtherPay = 0;
+                        const totalAmount = employeeChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
+                        const totalChecks = employeeChecks.length;
+                        
+                        employeeChecks.forEach(check => {
+                          if (check.relationshipDetails && check.relationshipDetails.length > 0) {
+                            check.relationshipDetails.forEach(rel => {
+                              totalRegularHours += rel.hours || 0;
+                              totalOtHours += rel.otHours || 0;
+                              totalHolidayHours += rel.holidayHours || 0;
+                              totalPerDiem += rel.perdiemAmount || 0;
+                              if (rel.otherPay) {
+                                rel.otherPay.forEach(op => {
+                                  totalOtherPay += parseFloat(op.amount || '0');
+                                });
+                              }
+                            });
+                          } else {
+                            totalRegularHours += check.hours || 0;
+                            totalOtHours += (check.otHours || check.overtimeHours || 0);
+                            totalHolidayHours += check.holidayHours || 0;
+                            totalPerDiem += check.perdiemAmount || 0;
+                            if (check.otherPay) {
+                              check.otherPay.forEach(op => {
+                                totalOtherPay += parseFloat(op.amount || '0');
+                              });
+                            }
+                          }
+                        });
+                        
+                        return {
+                          totalChecks,
+                          totalAmount,
+                          totalRegularHours,
+                          totalOtHours,
+                          totalHolidayHours,
+                          totalPerDiem,
+                          totalOtherPay
+                        };
+                      })
+                      .filter(Boolean);
+                    
+                    const grandTotals = employeesWithData.reduce<{
+                      totalChecks: number;
+                      totalAmount: number;
+                      totalRegularHours: number;
+                      totalOtHours: number;
+                      totalHolidayHours: number;
+                      totalPerDiem: number;
+                      totalOtherPay: number;
+                    }>((acc, item) => {
+                      if (!item) return acc;
+                      return {
+                        totalChecks: acc.totalChecks + item.totalChecks,
+                        totalAmount: acc.totalAmount + item.totalAmount,
+                        totalRegularHours: acc.totalRegularHours + item.totalRegularHours,
+                        totalOtHours: acc.totalOtHours + item.totalOtHours,
+                        totalHolidayHours: acc.totalHolidayHours + item.totalHolidayHours,
+                        totalPerDiem: acc.totalPerDiem + item.totalPerDiem,
+                        totalOtherPay: acc.totalOtherPay + item.totalOtherPay
+                      };
+                    }, {
+                      totalChecks: 0,
+                      totalAmount: 0,
+                      totalRegularHours: 0,
+                      totalOtHours: 0,
+                      totalHolidayHours: 0,
+                      totalPerDiem: 0,
+                      totalOtherPay: 0
+                    });
+                    
+                    return (
+                      <TableRow sx={{ backgroundColor: '#e3f2fd', fontWeight: 'bold' }}>
+                        <TableCell padding="checkbox"></TableCell>
+                        <TableCell colSpan={6}><strong>TOTAL</strong></TableCell>
+                        <TableCell align="right"><strong>{grandTotals.totalChecks}</strong></TableCell>
+                        <TableCell align="right"><strong>{grandTotals.totalRegularHours.toFixed(2)}</strong></TableCell>
+                        <TableCell align="right"><strong>{grandTotals.totalOtHours.toFixed(2)}</strong></TableCell>
+                        <TableCell align="right"><strong>{grandTotals.totalHolidayHours.toFixed(2)}</strong></TableCell>
+                        <TableCell align="right"><strong>${grandTotals.totalPerDiem.toFixed(2)}</strong></TableCell>
+                        <TableCell align="right"><strong>${grandTotals.totalOtherPay.toFixed(2)}</strong></TableCell>
+                        <TableCell align="right"><strong>${grandTotals.totalAmount.toLocaleString()}</strong></TableCell>
+                      </TableRow>
+                    );
                   })()}
                 </TableBody>
               </Table>
@@ -2669,6 +4106,104 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
             </TableContainer>
           </Box>
         )}
+
+        {/* Expenses Tab */}
+        {selectedTab === 4 && (
+          <Box>
+            <Typography variant="h6" gutterBottom>
+              Expenses Report{filters.companyId ? ` For ${companies.find(c => c.id === filters.companyId)?.name || 'Company'}` : ''}
+            </Typography>
+            
+            <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap', justifyContent: 'space-between' }}>
+              <Typography variant="body2" color="text.secondary">
+                Showing all expense checks from the selected filters
+              </Typography>
+              <Button
+                variant="contained"
+                startIcon={exporting ? <CircularProgress size={20} /> : <FileDownload />}
+                onClick={exportExpensesToExcel}
+                disabled={exporting}
+              >
+                {exporting ? 'Exporting...' : 'Export Expenses to Excel'}
+              </Button>
+            </Box>
+
+            <TableContainer>
+              <Table>
+                <TableHead>
+                  <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
+                    <TableCell><strong>Check Number</strong></TableCell>
+                    <TableCell><strong>Company</strong></TableCell>
+                    <TableCell><strong>Expense Name</strong></TableCell>
+                    <TableCell><strong>Description</strong></TableCell>
+                    <TableCell><strong>Date</strong></TableCell>
+                    <TableCell align="right"><strong>Amount</strong></TableCell>
+                    <TableCell><strong>Status</strong></TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {(() => {
+                    const expenseChecks = filteredChecks.filter(check => check.isExpense || check.payType === 'expense');
+                    
+                    if (expenseChecks.length === 0) {
+                      return (
+                        <TableRow>
+                          <TableCell colSpan={7} align="center" sx={{ py: 4 }}>
+                            <Typography variant="body2" color="text.secondary">
+                              No expenses found for the selected filters.
+                            </Typography>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    }
+
+                    return expenseChecks.map((check) => {
+                      const company = companies.find(c => c.id === check.companyId);
+                      const checkDate = check.date?.toDate ? check.date.toDate() : new Date(check.date);
+                      
+                      return (
+                        <TableRow key={check.id}>
+                          <TableCell>{check.checkNumber || check.id}</TableCell>
+                          <TableCell>{company?.name || 'Unknown Company'}</TableCell>
+                          <TableCell>{check.expenseName || 'N/A'}</TableCell>
+                          <TableCell>{check.expenseDescription || check.memo || 'N/A'}</TableCell>
+                          <TableCell>{checkDate.toLocaleDateString()}</TableCell>
+                          <TableCell align="right">${parseFloat(check.amount?.toString() || '0').toLocaleString()}</TableCell>
+                          <TableCell>
+                            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                              {check.paid && <Chip label="Paid" color="success" size="small" />}
+                              {check.reviewed && <Chip label="Reviewed" color="primary" size="small" />}
+                              {!check.paid && <Chip label="Unpaid" color="warning" size="small" />}
+                              {!check.reviewed && <Chip label="Unreviewed" color="error" size="small" />}
+                            </Box>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    });
+                  })()}
+                  
+                  {/* Total Row */}
+                  {(() => {
+                    const expenseChecks = filteredChecks.filter(check => check.isExpense || check.payType === 'expense');
+                    const totalExpenses = expenseChecks.reduce((sum, check) => sum + parseFloat(check.amount?.toString() || '0'), 0);
+                    
+                    if (expenseChecks.length === 0) return null;
+                    
+                    return (
+                      <TableRow sx={{ backgroundColor: '#e3f2fd', fontWeight: 'bold' }}>
+                        <TableCell colSpan={5}><strong>TOTAL</strong></TableCell>
+                        <TableCell align="right">
+                          <strong>${totalExpenses.toLocaleString()}</strong>
+                        </TableCell>
+                        <TableCell></TableCell>
+                      </TableRow>
+                    );
+                  })()}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Box>
+        )}
       </Paper>
 
       {/* Alerts */}
@@ -2758,7 +4293,7 @@ const Report: React.FC<ReportProps> = ({ currentRole, companyIds, visibleClientI
                   <TableCell align="right"><strong>Amount</strong></TableCell>
                   <TableCell align="right"><strong>Hours</strong></TableCell>
                   <TableCell align="right"><strong>OT Hours</strong></TableCell>
-                  <TableCell align="right"><strong>Holiday Hours</strong></TableCell>
+                  <TableCell align="right"><strong>PTO Hours</strong></TableCell>
                   <TableCell align="right"><strong>Pay Rate</strong></TableCell>
                   <TableCell align="right"><strong>Per Diem</strong></TableCell>
                   <TableCell><strong>Pay Type</strong></TableCell>

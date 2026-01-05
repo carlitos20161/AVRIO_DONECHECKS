@@ -1,20 +1,20 @@
 {
-  "short_name": "React App",
-  "name": "Create React App Sample",
+  "short_name": "Checks App",
+  "name": "Checks App - Payroll Management",
   "icons": [
     {
-      "src": "favicon.ico",
-      "sizes": "64x64 32x32 24x24 16x16",
-      "type": "image/x-icon"
+      "src": "checkmark-check-list-icon-sign-symbol-logo-green-design-illustration-free-vector.jpg",
+      "sizes": "980x980",
+      "type": "image/jpeg"
     },
     {
-      "src": "logo192.png",
-      "type": "image/png",
+      "src": "checkmark-check-list-icon-sign-symbol-logo-green-design-illustration-free-vector.jpg",
+      "type": "image/jpeg",
       "sizes": "192x192"
     },
     {
-      "src": "logo512.png",
-      "type": "image/png",
+      "src": "checkmark-check-list-icon-sign-symbol-logo-green-design-illustration-free-vector.jpg",
+      "type": "image/jpeg",
       "sizes": "512x512"
     }
   ],

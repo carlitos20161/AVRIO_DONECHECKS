@@ -61,4 +61,7 @@ export interface Check {
     clientName: string;
     payType: string;
   }>;
+  isExpense?: boolean; // Flag to indicate this is an expense check
+  expenseName?: string; // Name/description of the expense (for expense checks)
+  expenseDescription?: string; // Additional description for expense checks
 } 

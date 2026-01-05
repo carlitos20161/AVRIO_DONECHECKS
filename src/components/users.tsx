@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import {
   collection,
-  getDocs,
+  onSnapshot,
   updateDoc,
   deleteDoc,
   doc,
@@ -9,7 +9,7 @@ import {
   setDoc, // ✅ added setDoc
 } from "firebase/firestore";
 import { db, auth } from "../firebase"; // ✅ import auth
-import { createUserWithEmailAndPassword, signOut } from "firebase/auth"; // ✅ import createUserWithEmailAndPassword
+import { getApiUrl } from '../config';
 import {
   Paper,
   Typography,
@@ -40,12 +40,18 @@ import {
   TableHead,
   TableRow,
   Checkbox,
+  IconButton,
+  InputAdornment,
 } from "@mui/material";
 import {
   Print,
   PrintDisabled,
   Security,
+  Visibility,
+  VisibilityOff,
 } from '@mui/icons-material';
+import { logger } from '../utils/logger';
+import { encryptData, decryptData } from '../utils/encryption';
 
 interface Company {
   id: string;
@@ -115,77 +121,126 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState('');
   const [snackbarSeverity, setSnackbarSeverity] = useState<'success' | 'error' | 'warning' | 'info'>('success');
+  
+  // Delete confirmation dialog state
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [userToDelete, setUserToDelete] = useState<User | null>(null);
+  
+  // Password visibility toggle
+  const [showPassword, setShowPassword] = useState(false);
 
-  // fetch data
-  const fetchAll = async () => {
-    const snapUsers = await getDocs(collection(db, "users"));
-    const uList: User[] = snapUsers.docs.map((d) => {
-      const data = d.data() as any;
-      return {
-        id: d.id,
-        username: data.username,
-        email: data.email || "",
-        password: data.password,
-        role: data.role,
-        active: data.active ?? true,
-        companyIds: Array.isArray(data.companyIds) ? data.companyIds : [],
-        canPrintChecks: data.canPrintChecks ?? false, // ✅ Load printing permission
-        visibleClientIds: Array.isArray(data.visibleClientIds) ? data.visibleClientIds : [], // ✅ Load client visibility
-      };
-    });
-    setUsers(uList);
-
-    const snapCompanies = await getDocs(collection(db, "companies"));
-    const cList: Company[] = snapCompanies.docs.map((d) => {
-      const data = d.data() as any;
-      return {
-        id: d.id,
-        name: data.name,
-      };
-    });
-    setCompanies(cList);
-
-    const snapClients = await getDocs(collection(db, "clients"));
-    console.log('🔍 DEBUG Raw Firestore Client Data:', {
-      totalDocs: snapClients.docs.length,
-      sampleDoc: snapClients.docs[0] ? {
-        id: snapClients.docs[0].id,
-        data: snapClients.docs[0].data()
-      } : null,
-      sampleDocFields: snapClients.docs[0] ? Object.keys(snapClients.docs[0].data()) : [],
-      sampleDocFieldNames: snapClients.docs[0] ? Object.keys(snapClients.docs[0].data()) : [],
-      fieldNamesList: snapClients.docs[0] ? Object.keys(snapClients.docs[0].data()).join(', ') : 'none',
-      allClientFields: snapClients.docs.map(d => ({ 
-        id: d.id, 
-        name: d.data().name,
-        fields: Object.keys(d.data()),
-        companyIds: d.data().companyIds,
-        companyId: d.data().companyId,
-        companies: d.data().companies
-      }))
-    });
-    
-        const clientList: Client[] = snapClients.docs.map((d) => {
-          const data = d.data() as any;
-          return {
-            id: d.id,
-            name: data.name,
-            companyId: data.companyId || '', // Changed from companyIds to companyId
-          };
-        });
-        console.log('🔍 DEBUG Fetched Clients:', {
-          totalClients: clientList.length,
-          clientsData: clientList.map(c => ({ id: c.id, name: c.name, companyId: c.companyId })),
-          allClientCompanyIds: clientList.map(c => c.companyId).filter(id => id),
-          uniqueClientCompanyIds: Array.from(new Set(clientList.map(c => c.companyId).filter(id => id))),
-          sampleClient: clientList[0] // Show first client structure
-        });
-    setClients(clientList);
-    setLoading(false);
-  };
-
+  // Real-time listeners for users, companies, and clients
   useEffect(() => {
-    fetchAll().catch(console.error);
+    setLoading(true);
+    
+    // Real-time listener for users
+    const unsubscribeUsers = onSnapshot(collection(db, "users"), (snapUsers) => {
+      const uList: User[] = snapUsers.docs.map((d) => {
+        const data = d.data() as any;
+        // Decrypt password for display (only admins/managers can see it)
+        let decryptedPassword = '';
+        try {
+          if (data.password) {
+            // Try to decrypt - if it fails, it might be plain text (old data)
+            const decrypted = decryptData(data.password);
+            // If decryption returns empty or same value, it might be plain text
+            if (decrypted && decrypted !== data.password) {
+              decryptedPassword = decrypted;
+            } else {
+              // Keep as-is if decryption didn't work (might be plain text from old data)
+              decryptedPassword = data.password;
+            }
+          }
+        } catch (e) {
+          // If decryption fails, assume it's plain text (old data)
+          decryptedPassword = data.password || '';
+        }
+        
+        return {
+          id: d.id,
+          username: data.username,
+          email: data.email || "",
+          password: decryptedPassword,
+          role: data.role,
+          active: data.active ?? true,
+          companyIds: Array.isArray(data.companyIds) ? data.companyIds : [],
+          canPrintChecks: data.canPrintChecks ?? false, // ✅ Load printing permission
+          visibleClientIds: Array.isArray(data.visibleClientIds) ? data.visibleClientIds : [], // ✅ Load client visibility
+        };
+      });
+      setUsers(uList);
+      logger.log('✅ Users updated in real-time:', uList.length);
+    }, (error) => {
+      console.error('Error listening to users:', error);
+      setLoading(false);
+    });
+
+    // Real-time listener for companies
+    const unsubscribeCompanies = onSnapshot(collection(db, "companies"), (snapCompanies) => {
+      const cList: Company[] = snapCompanies.docs.map((d) => {
+        const data = d.data() as any;
+        return {
+          id: d.id,
+          name: data.name,
+        };
+      });
+      setCompanies(cList);
+      logger.log('✅ Companies updated in real-time:', cList.length);
+    }, (error) => {
+      console.error('Error listening to companies:', error);
+    });
+
+    // Real-time listener for clients
+    const unsubscribeClients = onSnapshot(collection(db, "clients"), (snapClients) => {
+      logger.log('🔍 DEBUG Raw Firestore Client Data:', {
+        totalDocs: snapClients.docs.length,
+        sampleDoc: snapClients.docs[0] ? {
+          id: snapClients.docs[0].id,
+          data: snapClients.docs[0].data()
+        } : null,
+        sampleDocFields: snapClients.docs[0] ? Object.keys(snapClients.docs[0].data()) : [],
+        sampleDocFieldNames: snapClients.docs[0] ? Object.keys(snapClients.docs[0].data()) : [],
+        fieldNamesList: snapClients.docs[0] ? Object.keys(snapClients.docs[0].data()).join(', ') : 'none',
+        allClientFields: snapClients.docs.map(d => ({ 
+          id: d.id, 
+          name: d.data().name,
+          fields: Object.keys(d.data()),
+          companyIds: d.data().companyIds,
+          companyId: d.data().companyId,
+          companies: d.data().companies
+        }))
+      });
+      
+      const clientList: Client[] = snapClients.docs.map((d) => {
+        const data = d.data() as any;
+        return {
+          id: d.id,
+          name: data.name,
+          companyId: data.companyId || '', // Changed from companyIds to companyId
+        };
+      });
+      logger.log('🔍 DEBUG Fetched Clients:', {
+        totalClients: clientList.length,
+        clientsData: clientList.map(c => ({ id: c.id, name: c.name, companyId: c.companyId })),
+        allClientCompanyIds: clientList.map(c => c.companyId).filter(id => id),
+        uniqueClientCompanyIds: Array.from(new Set(clientList.map(c => c.companyId).filter(id => id))),
+        sampleClient: clientList[0] // Show first client structure
+      });
+      setClients(clientList);
+      logger.log('✅ Clients updated in real-time:', clientList.length);
+    }, (error) => {
+      console.error('Error listening to clients:', error);
+    });
+
+    // Set loading to false after initial load
+    setTimeout(() => setLoading(false), 500);
+
+    // Cleanup listeners on unmount
+    return () => {
+      unsubscribeUsers();
+      unsubscribeCompanies();
+      unsubscribeClients();
+    };
   }, []);
 
   // Auto-select all clients when companies are changed (but only if user has no saved visibility settings)
@@ -199,22 +254,26 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
           const availableClients = clients.filter(client => 
             clientBelongsToCompanies(client, editCompanies)
           ).map(client => client.id);
+          
+          // Add expenses for each company
+          const expensesIds = editCompanies.map(companyId => `expenses:${companyId}`);
+          const allAvailableItems = [...availableClients, ...expensesIds];
       
-      // Only update if the current selection doesn't match available clients
-      const currentSelection = editVisibleClients.filter(id => availableClients.includes(id));
-      if (currentSelection.length !== availableClients.length) {
-            console.log('🔍 DEBUG: Auto-selecting all clients because user has no saved visibility settings');
-        setEditVisibleClients(availableClients);
+      // Only update if the current selection doesn't match available items
+      const currentSelection = editVisibleClients.filter(id => allAvailableItems.includes(id));
+      if (currentSelection.length !== allAvailableItems.length) {
+            logger.log('🔍 DEBUG: Auto-selecting all clients and expenses because user has no saved visibility settings');
+        setEditVisibleClients(allAvailableItems);
       }
     } else {
       setEditVisibleClients([]);
     }
       } else {
-        console.log('🔍 DEBUG: User has saved visibility settings, not auto-selecting');
+        logger.log('🔍 DEBUG: User has saved visibility settings, not auto-selecting');
         // If user has saved visibility settings, ensure we're showing their saved settings
         // and not overriding them with auto-selection
         if (editVisibleClients.length === 0 && selectedUser.visibleClientIds && selectedUser.visibleClientIds.length > 0) {
-          console.log('🔍 DEBUG: Restoring saved visibility settings:', selectedUser.visibleClientIds);
+          logger.log('🔍 DEBUG: Restoring saved visibility settings:', selectedUser.visibleClientIds);
           setEditVisibleClients(selectedUser.visibleClientIds);
         }
       }
@@ -226,37 +285,62 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
     if (selectedUser && openDetails) {
       const hasSavedVisibilitySettings = selectedUser.visibleClientIds && selectedUser.visibleClientIds.length > 0;
       if (hasSavedVisibilitySettings && selectedUser.visibleClientIds) {
-        console.log('🔍 DEBUG: Modal opened with saved visibility settings, restoring:', selectedUser.visibleClientIds);
+        logger.log('🔍 DEBUG: Modal opened with saved visibility settings, restoring:', selectedUser.visibleClientIds);
         setEditVisibleClients(selectedUser.visibleClientIds);
       }
     }
   }, [selectedUser, openDetails]);
 
-  // ✅ Updated to also create Auth user
+  // ✅ Updated to create Auth user via backend (doesn't sign admin out)
   const handleSave = async () => {
     if (!email.trim() || !username.trim() || !password.trim()) {
       alert("Please enter email, username and password");
       return;
     }
+    
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      showNotification("❌ You must be logged in to create users", 'error');
+      return;
+    }
+
     try {
-      // 1. Create in Firebase Auth
-      const cred = await createUserWithEmailAndPassword(auth, email, password);
+      // 1. Create user in Firebase Auth via backend (doesn't sign anyone in)
+      const apiUrl = getApiUrl('/api/create_user_auth');
+      console.log('🔍 Creating user via backend:', apiUrl);
+      
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email,
+          password,
+          requesterId: currentUser.uid,
+        }),
+      });
+
+      const result = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(result.error || 'Failed to create user in Firebase Auth');
+      }
+
+      const newUserId = result.uid;
 
       // 2. Save extra profile data in Firestore with UID as doc ID
-      await setDoc(doc(db, "users", cred.user.uid), {
-        uid: cred.user.uid,
+      await setDoc(doc(db, "users", newUserId), {
+        uid: newUserId,
         email,
         username,
-        // ✅ REMOVED password - Firebase Auth handles this securely
+        password: encryptData(password), // Store password encrypted for security
         role,
         active: true,
         companyIds,
         canPrintChecks, // ✅ Save printing permission
         createdAt: serverTimestamp(),
       });
-
-      // 3. Sign out the newly created user immediately
-      await auth.signOut();
 
       setOpenForm(false);
       setEmail("");
@@ -265,10 +349,10 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
       setRole("user");
       setCompanyIds([]);
       setCanPrintChecks(false); // Reset new state
-      fetchAll();
+      // Real-time listener will automatically update the UI
       showNotification("✅ User created successfully! They can now log in.", 'success');
     } catch (err: any) {
-      console.error(err);
+      console.error('❌ Error creating user:', err);
       showNotification("❌ Failed to create user: " + err.message, 'error');
     }
   };
@@ -281,20 +365,23 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
 
   const handleOpenDetails = (user: User) => {
     setSelectedUser(user);
-    setEditPassword(user.password);
+    // Load password from user data for reference
+    setEditPassword(user.password || "");
     setEditRole(user.role); // ✅ Set role state
     setEditCompanies(user.companyIds || []);
     setEditActive(user.active);
     setEditCanPrintChecks(user.canPrintChecks ?? false); // Set new state for edit
     setEditVisibleClients(user.visibleClientIds || []); // ✅ Set client visibility state
     setHasManuallyChangedVisibility(false); // Reset manual change flag when opening user details
+    // Show password by default for admins/managers
+    setShowPassword(currentRole === 'admin' || currentRole === 'manager');
     setOpenDetails(true);
   };
 
   const handleUpdateUser = async () => {
     if (!selectedUser) return;
     
-    console.log('🔍 DEBUG handleUpdateUser:', {
+    logger.log('🔍 DEBUG handleUpdateUser:', {
       selectedUser: selectedUser,
       editVisibleClients: editVisibleClients,
       selectedUserVisibleClients: selectedUser.visibleClientIds || [],
@@ -311,11 +398,10 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
     // Only update fields that actually changed
     const updates: any = {};
     
-    if (editPassword !== selectedUser.password) {
-      // Only update password if it's not empty (user actually wants to change it)
-      if (editPassword && editPassword.trim() !== '') {
-        updates.password = editPassword;
-      }
+    // Password updates: Encrypt and update password in Firestore if changed
+    if (editPassword && editPassword.trim() !== '' && editPassword !== selectedUser.password) {
+      updates.password = encryptData(editPassword);
+      // Note: This only updates Firestore. To update Firebase Auth password, backend endpoint needed.
     }
       
       if (editRole !== selectedUser.role) {
@@ -336,24 +422,24 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
     
     if (JSON.stringify(editVisibleClients) !== JSON.stringify(selectedUser.visibleClientIds || [])) {
       updates.visibleClientIds = editVisibleClients;
-        console.log('🔍 DEBUG: Updating visibleClientIds to:', editVisibleClients);
+        logger.log('🔍 DEBUG: Updating visibleClientIds to:', editVisibleClients);
       }
       
-      console.log('🔍 DEBUG: Updates object:', updates);
+      logger.log('🔍 DEBUG: Updates object:', updates);
       
       // Always save visibleClientIds to ensure it's persisted
       if (!updates.visibleClientIds) {
         updates.visibleClientIds = editVisibleClients;
-        console.log('🔍 DEBUG: Force updating visibleClientIds to:', editVisibleClients);
+        logger.log('🔍 DEBUG: Force updating visibleClientIds to:', editVisibleClients);
     }
     
     // Only update if there are actual changes
     if (Object.keys(updates).length > 0) {
-        console.log('🔍 DEBUG: Saving to Firestore with updates:', updates);
+        logger.log('🔍 DEBUG: Saving to Firestore with updates:', updates);
       await updateDoc(doc(db, "users", selectedUser.id), updates);
         showNotification("✅ User updated successfully!", 'success');
       setOpenDetails(false);
-      fetchAll();
+      // Real-time listener will automatically update the UI
     } else {
         showNotification("No changes to save", 'warning');
       }
@@ -363,7 +449,7 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
     }
   };
 
-  const handleDeleteUser = async () => {
+  const handleDeleteUserClick = () => {
     if (!selectedUser) return;
     
     // 🔒 SECURITY: Prevent managers from deleting admin accounts
@@ -372,17 +458,87 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
       return;
     }
     
-    if (!window.confirm("Are you sure you want to delete this user?")) return;
+    setUserToDelete(selectedUser);
+    setDeleteConfirmOpen(true);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!userToDelete) return;
     
     try {
-      await deleteDoc(doc(db, "users", selectedUser.id));
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        showNotification("❌ You must be logged in to delete users", 'error');
+        return;
+      }
+
+      // First, delete from Firebase Auth via backend
+      let authDeleted = false;
+      try {
+        const apiUrl = getApiUrl('/api/delete_user_auth');
+        console.log('🔍 Calling backend to delete from Auth:', apiUrl);
+        console.log('🔍 Backend URL from config:', process.env.REACT_APP_BACKEND_URL || 'http://localhost:5004 (default)');
+        console.log('🔍 Request payload:', { userId: userToDelete.id, requesterId: currentUser.uid });
+        
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            userId: userToDelete.id,
+            requesterId: currentUser.uid,
+          }),
+        });
+
+        const result = await response.json();
+        console.log('🔍 Backend response:', response.status, result);
+        
+        if (!response.ok) {
+          // If user doesn't exist in Auth (maybe was never created properly), continue with Firestore deletion
+          if (response.status === 404) {
+            console.warn('⚠️ User not found in Firebase Auth, continuing with Firestore deletion');
+            showNotification("⚠️ User not found in Firebase Auth, but deleted from database", 'warning');
+          } else {
+            // Show error but still try to delete from Firestore
+            const errorMsg = result.error || 'Failed to delete user from Firebase Auth';
+            console.error('❌ Backend error:', errorMsg);
+            showNotification(`⚠️ ${errorMsg}. User will be removed from database only.`, 'warning');
+          }
+        } else {
+          authDeleted = true;
+          console.log('✅ Successfully deleted from Firebase Auth');
+        }
+      } catch (authErr: any) {
+        // If backend is unavailable, show error but continue
+        console.error('❌ Error calling backend:', authErr);
+        showNotification(`⚠️ Backend unavailable: ${authErr.message}. User will be removed from database only. Make sure backend is running.`, 'warning');
+      }
+
+      // Then delete from Firestore
+      await deleteDoc(doc(db, "users", userToDelete.id));
+      
       setOpenDetails(false);
-      fetchAll();
-      showNotification("✅ User deleted successfully", 'success');
-    } catch (err) {
+      setDeleteConfirmOpen(false);
+      setUserToDelete(null);
+      // Real-time listener will automatically update the UI
+      
+      if (authDeleted) {
+        showNotification("✅ User deleted successfully from both database and authentication", 'success');
+      } else {
+        showNotification("⚠️ User deleted from database, but Firebase Auth deletion failed. Email may still be in use. Check backend logs.", 'warning');
+      }
+    } catch (err: any) {
       console.error('❌ Error deleting user:', err);
-      showNotification("❌ Failed to delete user", 'error');
+      showNotification(`❌ Failed to delete user: ${err.message || 'Unknown error'}`, 'error');
+      setDeleteConfirmOpen(false);
+      setUserToDelete(null);
     }
+  };
+
+  const handleDeleteCancel = () => {
+    setDeleteConfirmOpen(false);
+    setUserToDelete(null);
   };
 
   if (loading) return <Typography>Loading users...</Typography>;
@@ -700,9 +856,29 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
           </FormControl>
           <TextField
             label="Password"
+            type={showPassword ? "text" : "password"}
             value={editPassword}
             onChange={(e) => setEditPassword(e.target.value)}
             disabled={currentRole === 'manager' && selectedUser?.role === 'admin'}
+            placeholder="Enter password"
+            helperText={currentRole === 'admin' || currentRole === 'manager' 
+              ? "Password stored encrypted in database. Enter a new password to change it. Note: To update Firebase Auth password, backend support is needed."
+              : "Password field"}
+            InputProps={{
+              readOnly: currentRole !== 'admin' && currentRole !== 'manager',
+              endAdornment: (currentRole === 'admin' || currentRole === 'manager') && (
+                <InputAdornment position="end">
+                  <IconButton
+                    aria-label="toggle password visibility"
+                    onClick={() => setShowPassword(!showPassword)}
+                    edge="end"
+                    disabled={currentRole === 'manager' && selectedUser?.role === 'admin'}
+                  >
+                    {showPassword ? <VisibilityOff /> : <Visibility />}
+                  </IconButton>
+                </InputAdornment>
+              ),
+            }}
           />
           <FormControlLabel
             control={
@@ -779,14 +955,28 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
               </Typography>
               {editCompanies.map(companyId => {
                 const company = companies.find(c => c.id === companyId);
-                const companyClients = clients.filter(client => clientBelongsToCompanies(client, [companyId]));
+                // Filter to only show clients/departments that are checked (in editVisibleClients)
+                const allCompanyClients = clients.filter(client => clientBelongsToCompanies(client, [companyId]));
+                const checkedClients = allCompanyClients.filter(client => editVisibleClients.includes(client.id));
+                const expensesId = `expenses:${companyId}`;
+                const hasExpensesChecked = editVisibleClients.includes(expensesId);
+                
+                // Combine checked clients with expenses if checked
+                const visibleItems: string[] = [];
+                checkedClients.forEach(client => visibleItems.push(client.name));
+                if (hasExpensesChecked) {
+                  visibleItems.push('Expenses');
+                }
+                
                 return (
                   <Box key={companyId} sx={{ mb: 1 }}>
                     <Typography variant="body2" fontWeight="bold" color="primary">
                       • {company?.name || 'Unknown Company'}
                     </Typography>
                     <Typography variant="caption" color="text.secondary" sx={{ ml: 2 }}>
-                      {companyClients.length} client(s): {companyClients.map(c => c.name).join(', ') || 'No clients'}
+                      {visibleItems.length > 0 
+                        ? `${visibleItems.length} client(s): ${visibleItems.join(', ')}`
+                        : 'No clients selected'}
                     </Typography>
                   </Box>
                 );
@@ -818,7 +1008,7 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
                   const availableClients = clients.filter(client => 
                     clientBelongsToCompanies(client, editCompanies)
                   );
-                      console.log('🔍 DEBUG Client Visibility Table:', {
+                      logger.log('🔍 DEBUG Client Visibility Table:', {
                         allClients: clients.map(c => ({ 
                           id: c.id, 
                           name: c.name, 
@@ -831,27 +1021,114 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
                         clientCompanyIdsFlat: clients.map(c => c.companyId).filter(id => id),
                         editCompaniesFlat: editCompanies
                       });
-                      return availableClients;
-                    })()
-                      .map((client) => {
-                        const clientCompany = companies.find(c => 
-                          editCompanies.includes(c.id) && clientBelongsToCompanies(client, [c.id])
+                      
+                      // Group clients by company and sort
+                      // First, get all companies that are in editCompanies, sorted alphabetically
+                      const relevantCompanies = companies
+                        .filter(c => editCompanies.includes(c.id))
+                        .sort((a, b) => a.name.localeCompare(b.name));
+                      
+                      console.log('🔍 DEBUG Relevant companies (sorted):', 
+                        relevantCompanies.map(c => ({ id: c.id, name: c.name })));
+                      logger.log('🔍 DEBUG Relevant companies (sorted):', 
+                        relevantCompanies.map(c => ({ id: c.id, name: c.name })));
+                      
+                      const clientsByCompany: { [companyId: string]: typeof availableClients } = {};
+                      
+                      // Initialize empty arrays for each company
+                      relevantCompanies.forEach(company => {
+                        clientsByCompany[company.id] = [];
+                      });
+                      
+                      // Assign each client to the first company (alphabetically) it belongs to
+                      availableClients.forEach(client => {
+                        // Get client's company IDs for debugging
+                        const clientCompanyIds = Array.isArray(client.companyId) 
+                          ? client.companyId 
+                          : client.companyIds || (client.companyId ? [client.companyId] : []);
+                        
+                        // Find the first company (alphabetically) that this client belongs to
+                        const primaryCompany = relevantCompanies.find(c => 
+                          clientBelongsToCompanies(client, [c.id])
                         );
-                        const isVisible = editVisibleClients.includes(client.id);
+                        
+                        console.log(`🔍 DEBUG Client "${client.name}":`, {
+                          clientCompanyIds,
+                          belongsTo: primaryCompany ? primaryCompany.name : 'NONE',
+                          allMatches: relevantCompanies.filter(c => 
+                            clientBelongsToCompanies(client, [c.id])
+                          ).map(c => c.name)
+                        });
+                        logger.log(`🔍 DEBUG Client "${client.name}":`, {
+                          clientCompanyIds,
+                          belongsTo: primaryCompany ? primaryCompany.name : 'NONE',
+                          allMatches: relevantCompanies.filter(c => 
+                            clientBelongsToCompanies(client, [c.id])
+                          ).map(c => c.name)
+                        });
+                        
+                        if (primaryCompany) {
+                          clientsByCompany[primaryCompany.id].push(client);
+                        }
+                      });
+                      
+                      // Flatten and sort clients within each company, storing the assigned company
+                      interface ClientWithCompany {
+                        client: typeof availableClients[0];
+                        company: typeof companies[0];
+                        isExpenses?: boolean; // Flag to indicate if this is an expenses row
+                      }
+                      const sortedClientsWithCompany: ClientWithCompany[] = [];
+                      relevantCompanies.forEach(company => {
+                        const companyClients = clientsByCompany[company.id];
+                        // Sort clients within company alphabetically
+                        companyClients.sort((a, b) => a.name.localeCompare(b.name));
+                        console.log(`🔍 DEBUG Grouping: ${company.name} has ${companyClients.length} clients:`, 
+                          companyClients.map(c => c.name));
+                        logger.log(`🔍 DEBUG Grouping: ${company.name} has ${companyClients.length} clients:`, 
+                          companyClients.map(c => c.name));
+                        companyClients.forEach(client => {
+                          sortedClientsWithCompany.push({ client, company, isExpenses: false });
+                        });
+                        // Add Expenses row for this company (after all clients)
+                        sortedClientsWithCompany.push({ 
+                          client: { id: `expenses:${company.id}`, name: 'Expenses' } as any, 
+                          company, 
+                          isExpenses: true 
+                        });
+                      });
+                      
+                      console.log('🔍 DEBUG Final sorted clients order:', 
+                        sortedClientsWithCompany.map(item => 
+                          `${item.isExpenses ? 'Expenses' : item.client.name} (${item.company.name})`
+                        ));
+                      logger.log('🔍 DEBUG Final sorted clients order:', 
+                        sortedClientsWithCompany.map(item => 
+                          `${item.isExpenses ? 'Expenses' : item.client.name} (${item.company.name})`
+                        ));
+                      
+                      return sortedClientsWithCompany;
+                    })()
+                      .map(({ client, company: clientCompany, isExpenses }) => {
+                        const expenseId = isExpenses ? `expenses:${clientCompany.id}` : null;
+                        const itemId = expenseId || client.id;
+                        const isVisible = editVisibleClients.includes(itemId);
                         
                         return (
-                          <TableRow key={client.id} hover>
-                            <TableCell>{client.name}</TableCell>
-                            <TableCell>{clientCompany?.name || 'Multiple Companies'}</TableCell>
+                          <TableRow key={itemId} hover>
+                            <TableCell sx={{ fontWeight: isExpenses ? 'bold' : 'normal', color: isExpenses ? '#e65100' : 'inherit' }}>
+                              {isExpenses ? 'Expenses' : client.name}
+                            </TableCell>
+                            <TableCell>{clientCompany.name}</TableCell>
                             <TableCell sx={{ textAlign: 'center' }}>
                               <Checkbox
                                 checked={isVisible}
                                 onChange={(e) => {
                                   setHasManuallyChangedVisibility(true); // Mark that user has manually changed visibility
                                   if (e.target.checked) {
-                                    setEditVisibleClients(prev => [...prev, client.id]);
+                                    setEditVisibleClients(prev => [...prev, itemId]);
                                   } else {
-                                    setEditVisibleClients(prev => prev.filter(id => id !== client.id));
+                                    setEditVisibleClients(prev => prev.filter(id => id !== itemId));
                                   }
                                 }}
                                 color="primary"
@@ -868,7 +1145,7 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
             const filteredClients = clients.filter(client => 
               clientBelongsToCompanies(client, editCompanies)
             );
-            console.log('🔍 DEBUG Empty State Check:', {
+            logger.log('🔍 DEBUG Empty State Check:', {
               totalClients: clients.length,
               filteredClients: filteredClients.length,
               editCompanies: editCompanies,
@@ -888,7 +1165,7 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
         <DialogActions>
           {/* 🔒 Only show delete button if user has permission */}
           {selectedUser && !(currentRole === 'manager' && selectedUser.role === 'admin') && (
-            <Button color="error" onClick={handleDeleteUser}>
+            <Button color="error" onClick={handleDeleteUserClick}>
               Delete User
             </Button>
           )}
@@ -899,6 +1176,31 @@ const UsersPage: React.FC<UsersPageProps> = ({ currentRole }) => {
             disabled={currentRole === 'manager' && selectedUser?.role === 'admin'}
           >
             Save Changes
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog
+        open={deleteConfirmOpen}
+        onClose={handleDeleteCancel}
+        aria-labelledby="delete-dialog-title"
+        aria-describedby="delete-dialog-description"
+      >
+        <DialogTitle id="delete-dialog-title">
+          Delete User
+        </DialogTitle>
+        <DialogContent>
+          <Typography id="delete-dialog-description">
+            Are you sure you want to delete <strong>{userToDelete?.username || userToDelete?.email}</strong>? This action cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleDeleteCancel} color="inherit">
+            Cancel
+          </Button>
+          <Button onClick={handleDeleteConfirm} color="error" variant="contained" autoFocus>
+            Delete
           </Button>
         </DialogActions>
       </Dialog>

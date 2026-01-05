@@ -27,6 +27,7 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CancelIcon from '@mui/icons-material/Cancel';
 import { collection, query, where, onSnapshot, updateDoc, doc, orderBy } from 'firebase/firestore';
 import { db, auth } from '../firebase';
+import { logger } from '../utils/logger';
 
 interface Notification {
   id: string;
@@ -58,7 +59,7 @@ const Notifications: React.FC = () => {
     const currentUser = auth.currentUser;
     if (!currentUser) return;
 
-    console.log('[Notifications] Setting up real-time listener for user:', currentUser.uid);
+    logger.log('[Notifications] Setting up real-time listener for user:', currentUser.uid);
 
     // Set up real-time listener for notifications - fetch ALL notifications (both read and unread)
     const q = query(
@@ -76,14 +77,14 @@ const Notifications: React.FC = () => {
       setNotifications(notifs);
       setUnreadCount(notifs.filter(n => !n.read).length);
       setLoading(false);
-      console.log('[Notifications] Notifications updated:', notifs.length, 'unread:', notifs.filter(n => !n.read).length);
+      logger.log('[Notifications] Notifications updated:', notifs.length, 'unread:', notifs.filter(n => !n.read).length);
     }, (err) => {
       console.error('[Notifications] Listener error:', err);
       setLoading(false);
     });
 
     return () => {
-      console.log('[Notifications] Cleaning up listener');
+      logger.log('[Notifications] Cleaning up listener');
       unsubscribe();
     };
   }, []);
@@ -92,7 +93,7 @@ const Notifications: React.FC = () => {
   const markAsRead = async (notificationId: string) => {
     try {
       await updateDoc(doc(db, "notifications", notificationId), { read: true });
-      console.log('[Notifications] Marked as read:', notificationId);
+      logger.log('[Notifications] Marked as read:', notificationId);
     } catch (err) {
       console.error('[Notifications] Error marking as read:', err);
     }
@@ -107,7 +108,7 @@ const Notifications: React.FC = () => {
           updateDoc(doc(db, "notifications", notif.id), { read: true })
         )
       );
-      console.log('[Notifications] All marked as read');
+      logger.log('[Notifications] All marked as read');
     } catch (err) {
       console.error('[Notifications] Error marking all as read:', err);
     }

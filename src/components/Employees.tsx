@@ -3,7 +3,8 @@ import {
   Box, Typography, Button, Dialog, DialogTitle, DialogContent,
   DialogActions, TextField, Select, MenuItem, InputLabel, FormControl,
   Switch, FormControlLabel, Card, CardContent, Avatar, Chip, Stack,
-  Checkbox, ListItemText, IconButton, Divider, Radio, RadioGroup
+  Checkbox, ListItemText, IconButton, Divider, Radio, RadioGroup,
+  Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper
 } from '@mui/material';
 import { db } from '../firebase';
 import { collection, getDocs, addDoc, updateDoc, doc, query, where, onSnapshot } from 'firebase/firestore';
@@ -12,6 +13,7 @@ import WorkIcon from '@mui/icons-material/Work';
 import CalendarMonthIcon from '@mui/icons-material/CalendarMonth';
 import DeleteIcon from '@mui/icons-material/Delete';
 import AddIcon from '@mui/icons-material/Add';
+import { logger } from '../utils/logger';
 
 // New interface for client-pay type relationships
 interface ClientPayTypeRelationship {
@@ -64,7 +66,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
   const [clients, setClients] = useState<Client[]>([]);
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('active');
   const [payTypeFilter, setPayTypeFilter] = useState<'all' | 'hourly' | 'perdiem'>('all');
   const [clientFilter, setClientFilter] = useState<string>('all');
   const [sortBy, setSortBy] = useState<'name' | 'position' | 'startDate' | 'payRate'>('name');
@@ -84,7 +86,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
     companyIds: [] as string[],
     clientId: '',
     startDate: '',
-    employeeType: 'single-hourly' as 'single-hourly' | 'single-perdiem' | 'multiple',
+    employeeType: 'multiple' as 'single-hourly' | 'single-perdiem' | 'multiple',
     hasMultipleClients: false,
     clientPayTypeRelationships: [] as ClientPayTypeRelationship[]
   });
@@ -110,17 +112,17 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
   const [profileLoading, setProfileLoading] = useState(false);
 
   useEffect(() => {
-    console.log("[Employees] 🚀 STARTING DATA FETCH");    const fetchData = async () => {
+    logger.log("[Employees] 🚀 STARTING DATA FETCH");    const fetchData = async () => {
       let empDocs = [];
       try {
         // For now, fetch all employees since the rules allow it
         const empSnap = await getDocs(collection(db, 'employees'));
         empDocs = empSnap.docs;
-        console.log('[DEBUG] Fetched employees:', empDocs.length);
-        console.log("[Employees] ���� DETAILED EMPLOYEE DATA:");
+        logger.log('[DEBUG] Fetched employees:', empDocs.length);
+        logger.log("[Employees] ���� DETAILED EMPLOYEE DATA:");
         empDocs.forEach((doc, index) => {
           const data = doc.data();
-          console.log(`[Employees] Employee ${index + 1}:`, {
+          logger.log(`[Employees] Employee ${index + 1}:`, {
             id: doc.id,
             name: data.name,
             clientId: data.clientId,
@@ -143,7 +145,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
              return (empCompanyId && companyIds.includes(empCompanyId)) || 
                     empCompanyIds.some(companyId => companyIds.includes(companyId));
            });
-          console.log('[DEBUG] Filtered employees for user:', filteredEmployees.length);
+          logger.log('[DEBUG] Filtered employees for user:', filteredEmployees.length);
         }
         
         setEmployees(filteredEmployees);
@@ -182,7 +184,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
             };
           });
           setClients(cliList);
-          console.log('[Employees] 🔄 Clients updated in real-time:', cliList.length);
+          logger.log('[Employees] 🔄 Clients updated in real-time:', cliList.length);
         }, (error) => {
           console.error('[DEBUG] Error in clients listener:', error);
           setClients([]);
@@ -200,7 +202,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
     return () => {
       if (unsubscribeClients) {
         unsubscribeClients();
-        console.log('[Employees] 🧹 Cleaned up clients listener');
+        logger.log('[Employees] 🧹 Cleaned up clients listener');
       }
     };
   }, [currentRole, companyIds]);
@@ -213,22 +215,10 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
 
   const handleAdd = async () => {
     // Validation
-    console.log("[Employees] 🚀 STARTING EMPLOYEE CREATION");
-    console.log("[Employees] ���� New employee data:", newEmployee);    if (!newEmployee.name.trim()) {
+    logger.log("[Employees] 🚀 STARTING EMPLOYEE CREATION");
+    logger.log("[Employees] ���� New employee data:", newEmployee);    if (!newEmployee.name.trim()) {
       alert('Please enter employee name');
       return;
-    }
-
-    if (newEmployee.employeeType === 'single-hourly' || newEmployee.employeeType === 'single-perdiem') {
-      if (!newEmployee.clientId) {
-        alert('Please select a client');
-        return;
-      }
-      // Only require pay rate for hourly employees
-      if (newEmployee.employeeType === 'single-hourly' && !newEmployee.payRate) {
-        alert('Please enter pay rate');
-        return;
-      }
     }
 
     if (newEmployee.employeeType === 'multiple') {
@@ -308,11 +298,11 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
     }
 
     const docRef = await addDoc(collection(db, 'employees'), data);
-    console.log("[Employees] 💾 SAVING EMPLOYEE TO FIREBASE");
-    console.log("[Employees] ���� Employee data to save:", data);    setEmployees((prev) => [...prev, { id: docRef.id, ...data } as Employee]);
+    logger.log("[Employees] 💾 SAVING EMPLOYEE TO FIREBASE");
+    logger.log("[Employees] ���� Employee data to save:", data);    setEmployees((prev) => [...prev, { id: docRef.id, ...data } as Employee]);
     setOpenAdd(false);
-    console.log("[Employees] ✅ EMPLOYEE SAVED SUCCESSFULLY");
-    console.log("[Employees] ��� Employee ID:", docRef.id);    setNewEmployee({
+    logger.log("[Employees] ✅ EMPLOYEE SAVED SUCCESSFULLY");
+    logger.log("[Employees] ��� Employee ID:", docRef.id);    setNewEmployee({
       name: '',
       address: '',
       position: '',
@@ -350,6 +340,13 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
     if (!id) return 'No Client';
     const cl = clients.find(c => c.id === id);
     return cl ? cl.name : 'Unknown Client';
+  };
+
+  const getClientNameWithDivision = (id?: string | null): string => {
+    if (!id) return 'No Client';
+    const cl = clients.find(c => c.id === id);
+    if (!cl) return 'Unknown Client';
+    return cl.division ? `${cl.name} (${cl.division})` : cl.name;
   };
 
   const handleSaveEdit = async () => {
@@ -455,8 +452,11 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
         bValue = b.startDate || '';
         break;
       case 'payRate':
-        aValue = a.payRate || 0;
-        bValue = b.payRate || 0;
+        // Use first hourly relationship's pay rate for sorting
+        const aFirstHourly = a.clientPayTypeRelationships?.find(rel => rel.payType === 'hourly' && rel.payRate);
+        const bFirstHourly = b.clientPayTypeRelationships?.find(rel => rel.payType === 'hourly' && rel.payRate);
+        aValue = aFirstHourly ? parseFloat(aFirstHourly.payRate || '0') : 0;
+        bValue = bFirstHourly ? parseFloat(bFirstHourly.payRate || '0') : 0;
         break;
       default:
         aValue = a.name.toLowerCase();
@@ -623,7 +623,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                   <MenuItem value="all">All Clients</MenuItem>
                   {filteredClients.map(client => (
                     <MenuItem key={client.id} value={client.id}>
-                      {client.name}
+                      {client.division ? `${client.name} (${client.division})` : client.name}
                     </MenuItem>
                   ))}
                 </Select>
@@ -742,116 +742,146 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
               )}
             </Box>
           ) : (
-            sortedEmployees.map((emp) => (
-              <Box
-  key={emp.id}
-  sx={{
-    border: '1px solid #ccc',
-    borderRadius: 2,
-    p: 2,
-    mt: 2,
-    maxWidth: 600,
-    mx: 'auto',
-    boxShadow: 1
-  }}
->
-
-                <Typography variant="h6">{emp.name}</Typography>
-                                  <Typography variant="body2">{emp.address || 'No address'}</Typography>
-                <Typography variant="body2">
-                  {emp.position} | {
-                    emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 0
-                      ? (() => {
-                          const hourlyRates = emp.clientPayTypeRelationships
-                            .filter(rel => rel.payType === 'hourly' && rel.payRate)
-                            .map(rel => `$${rel.payRate}/hour`);
-                          
-                          const perdiemRate = emp.clientPayTypeRelationships
-                            .some(rel => rel.payType === 'perdiem') 
-                            ? `$${emp.payRate || '0.00'}/day` 
-                            : null;
-                          
-                          const rates = [...hourlyRates];
-                          if (perdiemRate) rates.push(perdiemRate);
-                          
-                          return rates.join(' + ');
-                        })()
-                      : `$${isNaN(emp.payRate) ? '0.00' : emp.payRate}/${emp.payType === 'hourly' ? 'hour' : 'day'}`
-                  }
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  {emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 0 
-                    ? emp.clientPayTypeRelationships.map(rel => `${getClientName(rel.clientId)} (${rel.payType})`).join(' + ')
-                    : getClientName(emp.clientId) || 'No Client'
-                  }
-                </Typography>
-                {emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 0 && (
-                  <Box sx={{ mt: 1 }}>
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
-                      🔗 Client Relationships:
-                    </Typography>
-                    {emp.clientPayTypeRelationships.map((rel, idx) => (
-                      <Chip
-                        key={rel.id}
-                        label={`${getClientName(rel.clientId)} (${rel.payType})`}
-                        size="small"
-                        color={rel.active ? "primary" : "default"}
-                        variant={rel.active ? "filled" : "outlined"}
-                        sx={{ mr: 0.5, mb: 0.5 }}
-                      />
-                    ))}
-                  </Box>
-                )}
-                <Typography variant="body2" color="text.secondary">
-                  📅 Start Date: {emp.startDate ? new Date(emp.startDate + 'T00:00:00').toLocaleDateString() : 'N/A'}
-                </Typography>
-                <Typography
-  variant="body2"
-  sx={{
-    fontWeight: 'bold',
-    color: emp.active ? 'green' : 'red',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px'
-  }}
->
-                    {emp.active ? 'Active' : 'Inactive'}
-</Typography>
-
-                {(currentRole === 'admin' || currentRole === 'manager') && (
-                  <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
-                  <Button
-                    variant="outlined"
-                    onClick={() => handleCardClick(emp)}
-                  >
-                    Edit Employee
-                  </Button>
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={emp.active}
-                          onChange={(e) => handleToggleActive(emp.id, e.target.checked)}
-                          color="primary"
-                          size="small"
-                        />
-                      }
-                      label={
-                        <Typography 
-                          variant="body2" 
-                          sx={{ 
-                            fontWeight: 'bold', 
-                            color: emp.active ? 'green' : 'red',
-                            fontSize: '0.75rem'
+            <TableContainer component={Paper} sx={{ mt: 2 }}>
+              <Table size="small" sx={{ tableLayout: 'fixed', width: '100%' }}>
+                <colgroup>
+                  <col style={{ width: '180px' }} />
+                  <col style={{ width: '150px' }} />
+                  <col style={{ width: '120px' }} />
+                  <col style={{ width: '150px' }} />
+                  <col style={{ width: '200px' }} />
+                  <col style={{ width: '120px' }} />
+                  <col style={{ width: '100px' }} />
+                  <col style={{ width: '150px' }} />
+                </colgroup>
+                <TableHead>
+                  <TableRow sx={{ backgroundColor: '#f5f5f5' }}>
+                    <TableCell sx={{ fontWeight: 'bold', p: 1 }}>Name</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold', p: 1 }}>Address</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold', p: 1 }}>Position</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold', p: 1 }}>Pay Rate</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold', p: 1 }}>Client Relationships</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold', p: 1 }}>Start Date</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold', p: 1 }}>Status</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold', p: 1 }}>Actions</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {sortedEmployees.map((emp) => (
+                    <TableRow 
+                      key={emp.id}
+                      sx={{ 
+                        '&:hover': { backgroundColor: '#f5f5f5' },
+                        cursor: 'pointer'
+                      }}
+                      onClick={() => handleCardClick(emp)}
+                    >
+                      <TableCell sx={{ p: 1 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 'medium' }}>
+                          {emp.name}
+                        </Typography>
+                      </TableCell>
+                      <TableCell sx={{ p: 1 }}>
+                        <Typography variant="body2" color="text.secondary">
+                          {emp.address || 'No address'}
+                        </Typography>
+                      </TableCell>
+                      <TableCell sx={{ p: 1 }}>
+                        <Typography variant="body2">
+                          {emp.position || '-'}
+                        </Typography>
+                      </TableCell>
+                      <TableCell sx={{ p: 1 }}>
+                        <Typography variant="body2">
+                          {emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 0
+                            ? (() => {
+                                const hourlyRates = emp.clientPayTypeRelationships
+                                  .filter(rel => rel.payType === 'hourly' && rel.payRate)
+                                  .map(rel => `$${rel.payRate}/hr`);
+                                
+                                const perdiemRates = emp.clientPayTypeRelationships
+                                  .filter(rel => rel.payType === 'perdiem')
+                                  .map(() => 'Per Diem');
+                                
+                                const rates = [...hourlyRates, ...perdiemRates];
+                                
+                                return rates.length > 0 ? rates.join(' + ') : 'N/A';
+                              })()
+                            : 'N/A'
+                          }
+                        </Typography>
+                      </TableCell>
+                      <TableCell sx={{ p: 1 }}>
+                        {emp.clientPayTypeRelationships && emp.clientPayTypeRelationships.length > 0 ? (
+                          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                            {emp.clientPayTypeRelationships.map((rel, idx) => (
+                              <Chip
+                                key={rel.id}
+                                label={getClientNameWithDivision(rel.clientId)}
+                                size="small"
+                                color={rel.active ? "primary" : "default"}
+                                variant={rel.active ? "filled" : "outlined"}
+                                sx={{ 
+                                  fontSize: '0.7rem',
+                                  height: '24px',
+                                  minWidth: 'auto',
+                                  px: 0.75
+                                }}
+                              />
+                            ))}
+                          </Box>
+                        ) : (
+                          <Typography variant="body2" color="text.secondary">
+                            {getClientNameWithDivision(emp.clientId) || 'No Client'}
+                          </Typography>
+                        )}
+                      </TableCell>
+                      <TableCell sx={{ p: 1 }}>
+                        <Typography variant="body2" color="text.secondary">
+                          {emp.startDate ? new Date(emp.startDate + 'T00:00:00').toLocaleDateString() : 'N/A'}
+                        </Typography>
+                      </TableCell>
+                      <TableCell sx={{ p: 1 }}>
+                        <Typography
+                          variant="body2"
+                          sx={{
+                            fontWeight: 'bold',
+                            color: emp.active ? 'green' : 'red'
                           }}
                         >
                           {emp.active ? 'Active' : 'Inactive'}
                         </Typography>
-                      }
-                    />
-                  </Box>
-                )}
-              </Box>
-            ))
+                      </TableCell>
+                      <TableCell sx={{ p: 1 }} onClick={(e) => e.stopPropagation()}>
+                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                          {(currentRole === 'admin' || currentRole === 'manager') && (
+                            <>
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                onClick={() => handleCardClick(emp)}
+                                sx={{ fontSize: '0.75rem', py: 0.25 }}
+                              >
+                                Edit
+                              </Button>
+                              <Switch
+                                checked={emp.active}
+                                onChange={(e) => {
+                                  e.stopPropagation();
+                                  handleToggleActive(emp.id, e.target.checked);
+                                }}
+                                color="primary"
+                                size="small"
+                              />
+                            </>
+                          )}
+                        </Box>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
           )}
         </>
       ) : (
@@ -1009,99 +1039,10 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
           <TextField label="Address" value={newEmployee.address} onChange={(e) => setNewEmployee({ ...newEmployee, address: e.target.value })}/>
           <TextField label="Position" value={newEmployee.position} onChange={(e) => setNewEmployee({ ...newEmployee, position: e.target.value })}/>
           
-          {/* Employee Type Selection */}
-          <Box sx={{ mb: 2 }}>
-            <Typography variant="subtitle2" sx={{ mb: 1, color: 'primary.main' }}>
-              Employee Work Type
-            </Typography>
-            <RadioGroup
-              value={newEmployee.employeeType}
-              onChange={(e: any) => {
-                const type = e.target.value as 'single-hourly' | 'single-perdiem' | 'multiple';
-                setNewEmployee(prev => ({
-                  ...prev,
-                  employeeType: type,
-                  hasMultipleClients: type === 'multiple',
-                  payType: type === 'single-perdiem' ? 'perdiem' : 'hourly',
-                  payTypes: type === 'single-perdiem' ? ['perdiem'] : ['hourly'],
-                  clientPayTypeRelationships: type === 'multiple' ? [] : [],
-                  clientId: type === 'multiple' ? '' : prev.clientId,
-                  payRate: type === 'single-perdiem' ? '0' : prev.payRate  // Set to 0 for per diem
-                }));
-              }}
-            >
-              <FormControlLabel 
-                value="single-hourly" 
-                control={<Radio />} 
-                label="Works for ONE client - Hourly pay" 
-              />
-              <FormControlLabel 
-                value="single-perdiem" 
-                control={<Radio />} 
-                label="Works for ONE client - Per Diem pay" 
-              />
-              <FormControlLabel 
-                value="multiple" 
-                control={<Radio />} 
-                label="Works for MULTIPLE clients (flexible)" 
-              />
-            </RadioGroup>
-          </Box>
-
-          {/* Single Client Mode */}
-          {(newEmployee.employeeType === 'single-hourly' || newEmployee.employeeType === 'single-perdiem') && (
-            <>
-              <Box sx={{ mb: 2, p: 2, backgroundColor: '#f8f9fa', borderRadius: 1 }}>
-                <Typography variant="body2" color="primary" sx={{ fontWeight: 'bold' }}>
-                  {newEmployee.employeeType === 'single-hourly' ? 'Hourly Employee' : 'Per Diem Employee'}
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  {newEmployee.employeeType === 'single-hourly' 
-                    ? 'This employee will be paid hourly for one client' 
-                    : 'This employee will be paid per diem for one client (amounts entered when creating checks)'
-                  }
-                </Typography>
-              </Box>
-
-              <FormControl fullWidth>
-                <InputLabel>Client</InputLabel>
-                <Select
-                  value={newEmployee.clientId}
-                  onChange={(e) => setNewEmployee({ ...newEmployee, clientId: e.target.value })}
-                >
-                  {filteredClients.length > 0 ? (
-                    filteredClients.map(cl => {
-                      console.log('🔍 Client data:', cl);
-                      return (
-                        <MenuItem key={cl.id} value={cl.id}>
-                          {cl.name} {cl.division ? `(${cl.division})` : ''}
-                        </MenuItem>
-                      );
-                    })
-                  ) : (
-                    <MenuItem disabled>No clients available</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-
-              {/* Only show pay rate for hourly employees */}
-              {newEmployee.employeeType === 'single-hourly' && (
-                <TextField
-                  fullWidth
-                  label="Pay Rate (per hour)"
-                  value={newEmployee.payRate}
-                  onChange={(e) => setNewEmployee({ ...newEmployee, payRate: e.target.value })}
-                  placeholder="e.g., 17"
-                />
-              )}
-            </>
-          )}
-
           {/* Multiple Clients Mode - Relationship Management */}
-          {newEmployee.employeeType === 'multiple' && (
-            <Box sx={{ mb: 2 }}>
+          <Box sx={{ mb: 2 }}>
               <Typography variant="h6" sx={{ mb: 2, fontSize: '1rem', color: 'primary.main' }}>
-                Multiple Client Relationships
+                Client Relationship(s)
                 <Button
                   startIcon={<AddIcon />}
                   onClick={() => {
@@ -1245,7 +1186,6 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                 </Box>
               ))}
             </Box>
-          )}
           
           {/* ✅ Start Date outside Select */}
           <TextField
@@ -1378,25 +1318,11 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                   <MenuItem value="">No Client</MenuItem>
                   {filteredClients.map((c) => (
                     <MenuItem key={c.id} value={c.id}>
-                      {c.name}
+                      {c.division ? `${c.name} (${c.division})` : c.name}
                     </MenuItem>
                   ))}
                 </Select>
               </FormControl>
-              
-              {/* Pay Rate for Hourly Pay Type */}
-              {editEmployee.payTypes.includes('hourly') && (
-                <TextField
-                  label="Pay Rate (per hour)"
-                  variant="outlined"
-                  fullWidth
-                  type="number"
-                  value={editEmployee.payRate}
-                  onChange={(e) => setEditEmployee({ ...editEmployee, payRate: e.target.value })}
-                  InputLabelProps={{ shrink: true, sx: { fontWeight: 'bold' } }}
-                  InputProps={{ inputProps: { min: 0, step: 0.01 } }}
-                />
-              )}
             </>
           )}
           
@@ -1412,7 +1338,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                     clientId: '',
                     clientName: '',
                     payType: 'hourly',
-                    payRate: editEmployee.payRate || '17', // Default to current pay rate
+                    payRate: '17', // Default pay rate for new relationship
                     active: true
                   };
                   setEditEmployee(prev => ({
@@ -1433,11 +1359,12 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                   <Typography variant="subtitle2">
                     Relationship {index + 1}: {(() => {
-                      if (!relationship.clientName) return 'Select Client';
-                      const client = clients.find(c => c.name === relationship.clientName);
-                      return client && client.division 
-                        ? `${relationship.clientName} (${client.division})`
-                        : relationship.clientName;
+                      if (!relationship.clientId) return 'Select Client';
+                      const client = clients.find(c => c.id === relationship.clientId);
+                      if (!client) return relationship.clientName || 'Unknown Client';
+                      return client.division 
+                        ? `${client.name} (${client.division})`
+                        : client.name;
                     })()} - {relationship.payType === 'hourly' ? 'Hourly' : 'Per Diem'}
                   </Typography>
                   <IconButton
@@ -1553,17 +1480,6 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
             value={editEmployee.startDate}
             onChange={(e) => setEditEmployee({ ...editEmployee, startDate: e.target.value })}
           />
-          {editEmployee.payType === 'hourly' && (
-            <TextField
-              label="Pay Rate (per hour)"
-              variant="outlined"
-              fullWidth
-              type="number"
-              value={editEmployee.payRate}
-              onChange={(e) => setEditEmployee({ ...editEmployee, payRate: e.target.value })}
-              InputLabelProps={{ shrink: true, sx: { fontWeight: 'bold' } }}
-            />
-          )}
           <FormControl fullWidth variant="outlined">
             <InputLabel sx={{ fontWeight: 'bold' }}>Company</InputLabel>
             <Select
@@ -1638,17 +1554,6 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                 disabled={(currentRole !== 'admin' && currentRole !== 'manager')}
                 sx={{ mb: 2 }}
               />
-              {(profileEdit.payTypes && profileEdit.payTypes.includes('hourly')) && (
-                <TextField
-                  fullWidth
-                  label="Pay Rate (per hour)"
-                  type="number"
-                  value={profileEdit.payRate || ''}
-                  onChange={e => setProfileEdit({ ...profileEdit, payRate: e.target.value })}
-                  disabled={(currentRole !== 'admin' && currentRole !== 'manager')}
-                  sx={{ mb: 2 }}
-                />
-              )}
               <FormControl fullWidth sx={{ mb: 2 }}>
                 <InputLabel>Pay Types</InputLabel>
                 <Select
@@ -1701,7 +1606,13 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                 <b>Client:</b> {(() => {
                   // If employee has a specific clientId, show that client
                   if (profileEdit.clientId) {
-                    return getClientName(profileEdit.clientId);
+                    return getClientNameWithDivision(profileEdit.clientId);
+                  }
+                  // If employee has relationships, show those
+                  if (profileEdit.clientPayTypeRelationships && profileEdit.clientPayTypeRelationships.length > 0) {
+                    return profileEdit.clientPayTypeRelationships.map((rel: ClientPayTypeRelationship) => 
+                      getClientNameWithDivision(rel.clientId)
+                    ).join(', ');
                   }
                   // Otherwise, show all clients associated with the employee's company
                   const employeeCompanyId = profileEdit.companyId;
@@ -1710,7 +1621,7 @@ const Employees: React.FC<EmployeesProps> = ({ currentRole, companyIds }) => {
                       c.companyIds && c.companyIds.includes(employeeCompanyId)
                     );
                     if (companyClients.length > 0) {
-                      return companyClients.map(c => c.name).join(', ');
+                      return companyClients.map(c => c.division ? `${c.name} (${c.division})` : c.name).join(', ');
                     }
                   }
                   return 'N/A';
